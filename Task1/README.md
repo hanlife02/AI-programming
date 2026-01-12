@@ -19,6 +19,8 @@
 - `--num-workers`（默认 0，macOS 建议保持 0）
 - `--data-dir`（默认 `Task1/data`）
 - `--ckpt`（默认 `Task1/checkpoints/cifar_net.pth`）
+- `--loss-csv`（默认 `Task1/outputs/loss.csv`）
+- `--loss-plot`（默认 `Task1/outputs/loss_curve.png`）
 - `--device`（默认自动选择 cuda/cpu）
 
 ### 评估
