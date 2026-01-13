@@ -1,5 +1,29 @@
-__pycache__
-data
-checkpoints
-outputs
-figures
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.venv/
+venv/
+env/
+
+# OS/editor
+.DS_Store
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Training artifacts (any Task)
+data/
+checkpoints/
+outputs/
+figures/
+
+# Model/metrics artifacts
+*.pth
+*.pt
+*.csv
