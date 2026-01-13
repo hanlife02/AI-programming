@@ -69,7 +69,11 @@ def setup_dist(args: argparse.Namespace, info: DistInfo) -> None:
     backend = args.backend.strip()
     if not backend:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend, init_method="env://")
+    device_id: torch.device | None = None
+    if backend == "nccl" and torch.cuda.is_available():
+        torch.cuda.set_device(info.local_rank)
+        device_id = torch.device(f"cuda:{info.local_rank}")
+    dist.init_process_group(backend=backend, init_method="env://", device_id=device_id)
 
 
 def cleanup_dist(info: DistInfo) -> None:
