@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,12 +12,13 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
-import torchvision.transforms as transforms
 
 try:
-    from Task2.models.cnn import Cifar10CNN
+    from Task2.models.cnn import create_model
+    from Task2.utils import build_transforms, seed_everything
 except ModuleNotFoundError:
-    from models.cnn import Cifar10CNN
+    from models.cnn import create_model
+    from utils import build_transforms, seed_everything
 
 
 @dataclass(frozen=True)
@@ -35,12 +35,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128, help="Per-GPU batch size.")
     parser.add_argument("--lr", type=float, default=1e-2)
     parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--optimizer", type=str, default="sgd", choices=["sgd", "adamw"])
+    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "step", "cosine"])
+    parser.add_argument("--step-size", type=int, default=20)
+    parser.add_argument("--gamma", type=float, default=0.1)
+    parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-dir", type=str, default="")
     parser.add_argument("--run-name", type=str, default="")
+    parser.add_argument("--model", type=str, default="cnn", choices=["cnn", "cnn_bn"])
+    parser.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--val-split", type=float, default=0.1)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--backend", type=str, default="", help="DDP backend override (default: nccl if cuda else gloo).")
-    parser.add_argument("--no-eval", action="store_true", help="Skip test-set evaluation at the end.")
+    parser.add_argument("--no-eval", action="store_true", help="Skip validation evaluation at the end of each epoch.")
     return parser.parse_args()
 
 
@@ -89,10 +99,7 @@ def get_device(info: DistInfo) -> torch.device:
 
 
 def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    seed_everything(seed)
 
 
 def rank0_print(info: DistInfo, msg: str) -> None:
@@ -120,7 +127,7 @@ def write_metrics_csv(rows: list[dict[str, object]], path: Path) -> None:
         "epoch_time_sec",
         "images_per_sec",
         "train_loss",
-        "test_acc",
+        "val_acc",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -130,31 +137,11 @@ def write_metrics_csv(rows: list[dict[str, object]], path: Path) -> None:
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, device: torch.device, data_dir: Path, num_workers: int) -> float:
+def evaluate(model: nn.Module, device: torch.device, loader: torch.utils.data.DataLoader) -> float:
     model.eval()
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-    testset = torchvision.datasets.CIFAR10(
-        root=str(data_dir),
-        train=False,
-        download=True,
-        transform=transform,
-    )
-    testloader = torch.utils.data.DataLoader(
-        testset,
-        batch_size=512,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
-
     correct = 0
     total = 0
-    for images, labels in testloader:
+    for images, labels in loader:
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         outputs = model(images)
@@ -170,7 +157,7 @@ def main() -> None:
     setup_dist(args, info)
 
     device = get_device(info)
-    set_seed(args.seed)
+    set_seed(args.seed + info.rank)
 
     rank0_print(
         info,
@@ -186,30 +173,44 @@ def main() -> None:
     if info.enabled:
         dist.barrier()
 
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
+    train_transform, test_transform = build_transforms(args.augment)
 
     if info.enabled and info.rank != 0:
         dist.barrier()
-        trainset = torchvision.datasets.CIFAR10(
+        train_dataset_aug = torchvision.datasets.CIFAR10(
             root=str(data_dir),
             train=True,
             download=False,
-            transform=transform,
+            transform=train_transform,
         )
     else:
-        trainset = torchvision.datasets.CIFAR10(
+        train_dataset_aug = torchvision.datasets.CIFAR10(
             root=str(data_dir),
             train=True,
             download=True,
-            transform=transform,
+            transform=train_transform,
         )
         if info.enabled:
             dist.barrier()
+
+    train_dataset_plain = torchvision.datasets.CIFAR10(
+        root=str(data_dir),
+        train=True,
+        download=False,
+        transform=test_transform,
+    )
+
+    generator = torch.Generator().manual_seed(args.seed)
+    total_size = len(train_dataset_aug)
+    val_size = int(total_size * max(0.0, min(0.9, float(args.val_split))))
+    indices = torch.randperm(total_size, generator=generator).tolist()
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+
+    trainset: torch.utils.data.Dataset[object] = torch.utils.data.Subset(train_dataset_aug, train_indices)
+    valset: torch.utils.data.Dataset[object] | None = (
+        torch.utils.data.Subset(train_dataset_plain, val_indices) if val_size > 0 else None
+    )
 
     sampler: torch.utils.data.Sampler[int] | None = None
     if info.enabled:
@@ -230,7 +231,19 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    net: nn.Module = Cifar10CNN().to(device)
+    valloader = (
+        torch.utils.data.DataLoader(
+            valset,
+            batch_size=512,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+        )
+        if valset is not None
+        else None
+    )
+
+    net: nn.Module = create_model(args.model).to(device)
     if info.enabled:
         net = torch.nn.parallel.DistributedDataParallel(
             net,
@@ -238,10 +251,33 @@ def main() -> None:
             output_device=info.local_rank if device.type == "cuda" else None,
         )
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum)
+    criterion = nn.CrossEntropyLoss(label_smoothing=float(args.label_smoothing))
+    if args.optimizer == "sgd":
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=args.lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = optim.AdamW(
+            net.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+
+    if args.scheduler == "cosine":
+        scheduler: object | None = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    elif args.scheduler == "step":
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    else:
+        scheduler = None
+
+    use_amp = bool(args.amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     metrics_rows: list[dict[str, object]] = []
+    best_val_acc = -1.0
 
     for epoch in range(1, args.epochs + 1):
         if info.enabled and isinstance(sampler, torch.utils.data.distributed.DistributedSampler):
@@ -260,10 +296,12 @@ def main() -> None:
             labels = labels.to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             bsz = int(inputs.size(0))
             loss_sum += float(loss.item()) * bsz
@@ -275,10 +313,20 @@ def main() -> None:
             dist.all_reduce(loss_sum_t, op=dist.ReduceOp.SUM)
             dist.all_reduce(sample_count_t, op=dist.ReduceOp.SUM)
 
-        test_acc = ""
-        if (not args.no_eval) and info.rank == 0:
+        if scheduler is not None:
+            scheduler.step()
+
+        val_acc = ""
+        if (not args.no_eval) and info.rank == 0 and valloader is not None:
             model_for_eval = net.module if hasattr(net, "module") else net
-            test_acc = f"{evaluate(model_for_eval, device, data_dir, args.num_workers):.2f}"
+            acc = evaluate(model_for_eval, device, valloader)
+            val_acc = f"{acc:.2f}"
+            if acc > best_val_acc:
+                best_val_acc = acc
+                torch.save(
+                    {"model": args.model, "state_dict": model_for_eval.state_dict(), "epoch": epoch, "val_acc": acc},
+                    run_dir / "ckpt_best.pth",
+                )
 
         if info.enabled:
             dist.barrier()
@@ -305,19 +353,19 @@ def main() -> None:
                 "epoch_time_sec": f"{epoch_time_sec:.4f}",
                 "images_per_sec": f"{images_per_sec:.2f}",
                 "train_loss": f"{train_loss:.6f}",
-                "test_acc": test_acc,
+                "val_acc": val_acc,
             }
             metrics_rows.append(row)
             print(
                 f"epoch={epoch} time={epoch_time_sec:.3f}s img/s={images_per_sec:.1f} "
-                f"train_loss={train_loss:.4f} test_acc={test_acc}",
+                f"train_loss={train_loss:.4f} val_acc={val_acc}",
                 flush=True,
             )
 
     if info.rank == 0:
         ckpt_path = run_dir / "ckpt.pth"
         model_to_save = net.module if hasattr(net, "module") else net
-        torch.save(model_to_save.state_dict(), ckpt_path)
+        torch.save({"model": args.model, "state_dict": model_to_save.state_dict(), "epoch": args.epochs}, ckpt_path)
         write_metrics_csv(metrics_rows, run_dir / "metrics.csv")
         print(f"Saved checkpoint to: {ckpt_path}", flush=True)
         print(f"Saved metrics to: {run_dir / 'metrics.csv'}", flush=True)

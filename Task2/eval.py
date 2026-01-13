@@ -5,12 +5,13 @@ from pathlib import Path
 
 import torch
 import torchvision
-import torchvision.transforms as transforms
 
 try:
-    from Task2.models.cnn import Cifar10CNN
+    from Task2.models.cnn import create_model
+    from Task2.utils import build_transforms
 except ModuleNotFoundError:
-    from models.cnn import Cifar10CNN
+    from models.cnn import create_model
+    from utils import build_transforms
 
 
 CLASSES = (
@@ -34,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=str, default="")
     parser.add_argument("--ckpt", type=str, default="", required=True)
     parser.add_argument("--device", type=str, default="")
+    parser.add_argument("--model", type=str, default="", choices=["", "cnn", "cnn_bn"])
     return parser.parse_args()
 
 
@@ -52,19 +54,13 @@ def main() -> None:
 
     device = get_device(args.device)
     print(f"Using device: {device}")
-
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
+    _, test_transform = build_transforms(augment=False)
 
     testset = torchvision.datasets.CIFAR10(
         root=str(data_dir),
         train=False,
         download=True,
-        transform=transform,
+        transform=test_transform,
     )
     testloader = torch.utils.data.DataLoader(
         testset,
@@ -74,8 +70,15 @@ def main() -> None:
         pin_memory=(device.type == "cuda"),
     )
 
-    net = Cifar10CNN().to(device)
-    state_dict = torch.load(ckpt_path, map_location=device)
+    ckpt_obj = torch.load(ckpt_path, map_location=device)
+    if isinstance(ckpt_obj, dict) and "state_dict" in ckpt_obj:
+        model_name = str(ckpt_obj.get("model") or args.model or "cnn")
+        state_dict = ckpt_obj["state_dict"]
+    else:
+        model_name = str(args.model or "cnn")
+        state_dict = ckpt_obj
+
+    net = create_model(model_name).to(device)
     net.load_state_dict(state_dict)
     net.eval()
 
@@ -110,4 +113,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
