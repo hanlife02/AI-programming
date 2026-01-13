@@ -45,7 +45,7 @@ Task2/
 建议显式指定只用 1 张卡：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python Task2/train.py --epochs 2 --batch-size 128 --num-workers 4 --run-name single
+CUDA_VISIBLE_DEVICES=0 python Task2/train.py --run-name single
 ```
 
 输出：
@@ -61,7 +61,7 @@ CUDA_VISIBLE_DEVICES=0 python Task2/train.py --epochs 2 --batch-size 128 --num-w
 同机 2 GPU（推荐 `torchrun`）：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --epochs 2 --batch-size 128 --num-workers 4 --run-name ddp2
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --run-name ddp2
 ```
 
 说明：
@@ -88,8 +88,13 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py
 
 示例（保持全局 batch 不变）：
 
-- 单卡：`CUDA_VISIBLE_DEVICES=0 python Task2/train.py --model cnn_bn --epochs 2 --batch-size 128 --optimizer sgd --lr 0.1 --momentum 0.9 --weight-decay 5e-4 --scheduler cosine --augment --val-split 0.1 --run-name single_bn`
-- 双卡：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --model cnn_bn --epochs 2 --batch-size 64 --optimizer sgd --lr 0.1 --momentum 0.9 --weight-decay 5e-4 --scheduler cosine --augment --val-split 0.1 --run-name ddp2_bn`
+- 单卡（默认即为该配置）：`CUDA_VISIBLE_DEVICES=0 python Task2/train.py --run-name single_bn`
+- 双卡（保持全局 batch=128）：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --batch-size 64 --run-name ddp2_bn`
+
+快速跑通（缩短 epoch）：
+
+- 单卡：`CUDA_VISIBLE_DEVICES=0 python Task2/train.py --epochs 2 --run-name single_quick`
+- 双卡：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --epochs 2 --batch-size 64 --run-name ddp2_quick`
 
 ---
 

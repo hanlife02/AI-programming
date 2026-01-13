@@ -35,12 +35,13 @@ Task1/
 
 可选参数：
 
-- `--model`（默认 `cnn`，可选 `cnn_bn`，通常更高准确率）
-- `--epochs`（默认 2）
-- `--batch-size`（默认 4）
-- `--lr`（默认 1e-3）
+- `--model`（默认 `cnn_bn`，可选 `cnn`）
+- `--epochs`（默认 50）
+- `--batch-size`（默认 128）
+- `--lr`（默认 0.1）
 - `--optimizer`（默认 `sgd`，可选 `adamw`）
-- `--scheduler`（默认 `none`，可选 `step`/`cosine`）
+- `--weight-decay`（默认 5e-4）
+- `--scheduler`（默认 `cosine`，可选 `none`/`step`）
 - `--augment/--no-augment`（默认开启数据增强）
 - `--val-split`（默认 0.1，用训练集切出验证集，避免边训边盯 test）
 - `--num-workers`（默认 0，macOS 建议保持 0）
@@ -51,11 +52,15 @@ Task1/
 - `--loss-plot`（默认 `Task1/outputs/loss_curve.png`）
 - `--device`（默认自动选择 cuda/cpu）
 
-### （更高准确率）参数
+### 默认配置（等价命令）
 
-在不改代码的前提下，通常下面这套在 CIFAR-10 上会比默认参数更好：
+`python Task1/train.py` 默认就等价于：
 
 - `python Task1/train.py --model cnn_bn --epochs 50 --batch-size 128 --optimizer sgd --lr 0.1 --momentum 0.9 --weight-decay 5e-4 --scheduler cosine --augment --val-split 0.1`
+
+如果想快速跑通流程（更少 epoch），可以：
+
+- `python Task1/train.py --epochs 2`
 
 ### 绘制 loss curve
 
