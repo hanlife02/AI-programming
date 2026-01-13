@@ -48,8 +48,8 @@ Task1/
 - `--data-dir`（默认 `Task1/data`）
 - `--ckpt`（默认 `Task1/checkpoints/cifar_net.pth`）
 - `--best-ckpt`（默认 `Task1/checkpoints/cifar_net_best.pth`）
-- `--loss-csv`（默认 `Task1/outputs/loss.csv`）
-- `--loss-plot`（默认 `Task1/outputs/loss_curve.png`）
+- `--loss-csv`（默认不保存；如需保存可指定 `Task1/outputs/loss.csv`）
+- `--loss-plot`（默认不保存；如需保存可指定 `Task1/outputs/loss_curve.png`）
 - `--device`（默认自动选择 cuda/cpu）
 
 ### 默认配置（等价命令）
@@ -58,16 +58,12 @@ Task1/
 
 - `python Task1/train.py --model cnn_bn --epochs 50 --batch-size 128 --optimizer sgd --lr 0.1 --momentum 0.9 --weight-decay 5e-4 --scheduler cosine --augment --val-split 0.1`
 
-如果想快速跑通流程（更少 epoch），可以：
-
-- `python Task1/train.py --epochs 2`
 
 ### 绘制 loss curve
 
-训练脚本默认会输出：
+如果你需要保存每一步的 loss 以及 loss 曲线（默认不保存，避免影响训练吞吐），可以显式指定：
 
-- `Task1/outputs/loss.csv`
-- `Task1/outputs/loss_curve.png`
+- `python Task1/train.py --loss-csv Task1/outputs/loss.csv --loss-plot Task1/outputs/loss_curve.png`
 
 如果已经有 `loss.csv`，也可以单独绘图：
 

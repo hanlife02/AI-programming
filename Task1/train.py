@@ -46,13 +46,13 @@ def parse_args() -> argparse.Namespace:
         "--loss-csv",
         type=str,
         default="",
-        help="Path to save per-step loss as CSV (default: Task1/outputs/loss.csv).",
+        help="Path to save per-step loss as CSV (default: disabled).",
     )
     parser.add_argument(
         "--loss-plot",
         type=str,
         default="",
-        help="Path to save loss curve image (default: Task1/outputs/loss_curve.png).",
+        help="Path to save loss curve image (default: disabled).",
     )
     parser.add_argument("--device", type=str, default="")
     return parser.parse_args()
@@ -123,9 +123,8 @@ def main() -> None:
         else ckpt_path.with_name(f"{ckpt_path.stem}_best{ckpt_path.suffix}")
     )
     best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-    outputs_dir = task_dir / "outputs"
-    loss_csv_path = Path(args.loss_csv).expanduser() if args.loss_csv else (outputs_dir / "loss.csv")
-    loss_plot_path = Path(args.loss_plot).expanduser() if args.loss_plot else (outputs_dir / "loss_curve.png")
+    loss_csv_path = Path(args.loss_csv).expanduser() if args.loss_csv else None
+    loss_plot_path = Path(args.loss_plot).expanduser() if args.loss_plot else None
 
     device = get_device(args.device)
     print(f"Using device: {device}")
@@ -205,7 +204,8 @@ def main() -> None:
     use_amp = bool(args.amp and device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
-    loss_rows: list[dict[str, Any]] = []
+    record_loss = (loss_csv_path is not None) or (loss_plot_path is not None)
+    loss_rows: list[dict[str, Any]] = [] if record_loss else []
     global_step = 0
     best_val_loss = float("inf")
 
@@ -250,14 +250,15 @@ def main() -> None:
             bsz = int(labels.size(0))
             epoch_samples += bsz
             epoch_loss_sum += float(loss.item()) * bsz
-            loss_rows.append(
-                {
-                    "global_step": global_step,
-                    "epoch": epoch + 1,
-                    "batch_idx": i,
-                    "loss": float(loss.item()),
-                }
-            )
+            if record_loss:
+                loss_rows.append(
+                    {
+                        "global_step": global_step,
+                        "epoch": epoch + 1,
+                        "batch_idx": i,
+                        "loss": float(loss.item()),
+                    }
+                )
             global_step += 1
 
             if args.log_every > 0 and i % args.log_every == (args.log_every - 1):
@@ -294,11 +295,14 @@ def main() -> None:
     print(f"Saved checkpoint to: {ckpt_path}")
     if best_ckpt_path.exists():
         print(f"Saved best checkpoint to: {best_ckpt_path}")
-    write_loss_csv(loss_rows, loss_csv_path)
-    print(f"Saved loss CSV to: {loss_csv_path}")
-    maybe_save_loss_plot(loss_rows, loss_plot_path)
-    if loss_plot_path.exists():
-        print(f"Saved loss curve to: {loss_plot_path}")
+    if record_loss:
+        if loss_csv_path is not None:
+            write_loss_csv(loss_rows, loss_csv_path)
+            print(f"Saved loss CSV to: {loss_csv_path}")
+        if loss_plot_path is not None:
+            maybe_save_loss_plot(loss_rows, loss_plot_path)
+            if loss_plot_path.exists():
+                print(f"Saved loss curve to: {loss_plot_path}")
 
 
 if __name__ == "__main__":
