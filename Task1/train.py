@@ -49,10 +49,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to save per-step loss as CSV (default: disabled).",
     )
     parser.add_argument(
+        "--save-loss-plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save a loss curve PNG at the end of training (default: enabled).",
+    )
+    parser.add_argument(
         "--loss-plot",
         type=str,
         default="",
-        help="Path to save loss curve image (default: disabled).",
+        help="Path to save loss curve image (default: Task1/outputs/loss_curve.png when --save-loss-plot is enabled).",
     )
     parser.add_argument("--device", type=str, default="")
     return parser.parse_args()
@@ -124,7 +130,11 @@ def main() -> None:
     )
     best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     loss_csv_path = Path(args.loss_csv).expanduser() if args.loss_csv else None
-    loss_plot_path = Path(args.loss_plot).expanduser() if args.loss_plot else None
+    loss_plot_path = (
+        (Path(args.loss_plot).expanduser() if args.loss_plot else (task_dir / "outputs" / "loss_curve.png"))
+        if args.save_loss_plot
+        else None
+    )
 
     device = get_device(args.device)
     print(f"Using device: {device}")

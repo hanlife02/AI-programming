@@ -49,7 +49,8 @@ Task1/
 - `--ckpt`（默认 `Task1/checkpoints/cifar_net.pth`）
 - `--best-ckpt`（默认 `Task1/checkpoints/cifar_net_best.pth`）
 - `--loss-csv`（默认不保存；如需保存可指定 `Task1/outputs/loss.csv`）
-- `--loss-plot`（默认不保存；如需保存可指定 `Task1/outputs/loss_curve.png`）
+- `--save-loss-plot/--no-save-loss-plot`（默认开启保存 loss curve）
+- `--loss-plot`（默认保存到 `Task1/outputs/loss_curve.png`；也可自定义路径）
 - `--device`（默认自动选择 cuda/cpu）
 
 ### 默认配置（等价命令）
@@ -61,13 +62,21 @@ Task1/
 
 ### 绘制 loss curve
 
-如果你需要保存每一步的 loss 以及 loss 曲线（默认不保存，避免影响训练吞吐），可以显式指定：
+`python Task1/train.py` 默认会在训练结束后保存 loss 曲线到：
+
+- `Task1/outputs/loss_curve.png`
+
+如果你还需要保存每一步的 loss（CSV），可以显式指定：
 
 - `python Task1/train.py --loss-csv Task1/outputs/loss.csv --loss-plot Task1/outputs/loss_curve.png`
 
 如果已经有 `loss.csv`，也可以单独绘图：
 
 - `python Task1/plot_loss.py --csv Task1/outputs/loss.csv --out Task1/outputs/loss_curve.png`
+
+如果不想保存 loss 曲线（加速训练吞吐），可使用：
+
+- `python Task1/train.py --no-save-loss-plot`
 
 ### 评估
 
