@@ -27,3 +27,7 @@ figures/
 *.pth
 *.pt
 *.csv
+
+# Reports (local only)
+report.md
+report.pdf
