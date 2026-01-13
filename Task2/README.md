@@ -48,6 +48,10 @@ Task2/
 CUDA_VISIBLE_DEVICES=0 python Task2/train.py --run-name single
 ```
 
+说明：
+
+- `--num-workers` 默认 8
+
 输出：
 
 - `Task2/outputs/single/metrics.csv`：每个 epoch 的耗时、吞吐（images/sec）、loss、accuracy

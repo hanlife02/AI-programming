@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--step-size", type=int, default=20)
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--data-dir", type=str, default="")
     parser.add_argument("--run-name", type=str, default="")
