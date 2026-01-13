@@ -40,6 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--val-split", type=float, default=0.1)
+    parser.add_argument(
+        "--track-train-acc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Compute and log training accuracy (adds per-step overhead; default: disabled).",
+    )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--log-every", type=int, default=2000)
     parser.add_argument(
@@ -208,6 +214,7 @@ def main() -> None:
     loss_rows: list[dict[str, Any]] = []
     global_step = 0
     best_val_acc = -1.0
+    track_train_acc = bool(args.track_train_acc)
 
     @torch.no_grad()
     def eval_loader(loader: torch.utils.data.DataLoader) -> tuple[float, float]:
@@ -230,8 +237,9 @@ def main() -> None:
 
     for epoch in range(args.epochs):
         running_loss = 0.0
-        epoch_total = 0
-        epoch_correct = 0
+        epoch_samples = 0
+        epoch_correct = 0 if track_train_acc else None
+        epoch_loss_sum = 0.0
         net.train()
 
         if device.type == "cuda":
@@ -251,6 +259,9 @@ def main() -> None:
             scaler.update()
 
             running_loss += loss.item()
+            bsz = int(labels.size(0))
+            epoch_samples += bsz
+            epoch_loss_sum += float(loss.item()) * bsz
             loss_rows.append(
                 {
                     "global_step": global_step,
@@ -260,30 +271,34 @@ def main() -> None:
                 }
             )
             global_step += 1
-            _, predicted = torch.max(outputs, 1)
-            epoch_total += int(labels.size(0))
-            epoch_correct += int((predicted == labels).sum().item())
+            if track_train_acc and epoch_correct is not None:
+                _, predicted = torch.max(outputs, 1)
+                epoch_correct += int((predicted == labels).sum().item())
 
             if args.log_every > 0 and i % args.log_every == (args.log_every - 1):
                 denom = float(args.log_every)
-                train_acc = 0.0 if epoch_total == 0 else (100.0 * epoch_correct / epoch_total)
                 lr = optimizer.param_groups[0].get("lr", 0.0)
-                print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / denom:.3f} | lr: {lr:.5g} | acc: {train_acc:.2f}%")
+                msg = f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / denom:.3f} | lr: {lr:.5g}"
+                if track_train_acc and epoch_correct is not None and epoch_samples > 0:
+                    msg += f" | train acc: {100.0 * epoch_correct / epoch_samples:.2f}%"
+                print(msg)
                 running_loss = 0.0
 
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         train_time_sec = time.perf_counter() - t0
-        train_img_per_sec = 0.0 if train_time_sec <= 0 else (epoch_total / train_time_sec)
+        train_img_per_sec = 0.0 if train_time_sec <= 0 else (epoch_samples / train_time_sec)
 
         if scheduler is not None:
             scheduler.step()
 
-        train_acc = 0.0 if epoch_total == 0 else (epoch_correct / epoch_total)
+        train_loss = 0.0 if epoch_samples == 0 else (epoch_loss_sum / epoch_samples)
         msg = (
-            f"Epoch {epoch + 1}/{args.epochs} | train acc: {100.0 * train_acc:.2f}%"
+            f"Epoch {epoch + 1}/{args.epochs} | train loss: {train_loss:.4f}"
             f" | train time: {train_time_sec:.2f}s | train img/s: {train_img_per_sec:.1f}"
         )
+        if track_train_acc and epoch_correct is not None and epoch_samples > 0:
+            msg += f" | train acc: {100.0 * epoch_correct / epoch_samples:.2f}%"
         if valloader is not None:
             val_loss, val_acc = eval_loader(valloader)
             msg += f" | val loss: {val_loss:.4f} | val acc: {100.0 * val_acc:.2f}%"

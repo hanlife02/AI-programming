@@ -44,6 +44,7 @@ Task1/
 - `--scheduler`（默认 `cosine`，可选 `none`/`step`）
 - `--augment/--no-augment`（默认开启数据增强）
 - `--val-split`（默认 0.1，用训练集切出验证集，避免边训边盯 test）
+- `--track-train-acc/--no-track-train-acc`（默认关闭；开启会额外计算训练准确率，略影响训练速度）
 - `--num-workers`（默认 0，macOS 建议保持 0）
 - `--data-dir`（默认 `Task1/data`）
 - `--ckpt`（默认 `Task1/checkpoints/cifar_net.pth`）
