@@ -265,27 +265,32 @@ def main() -> None:
             loss_sum += float(loss.item()) * bsz
             sample_count += bsz
 
+        loss_sum_t = torch.tensor(loss_sum, device=device)
+        sample_count_t = torch.tensor(sample_count, device=device, dtype=torch.long)
+        if info.enabled:
+            dist.all_reduce(loss_sum_t, op=dist.ReduceOp.SUM)
+            dist.all_reduce(sample_count_t, op=dist.ReduceOp.SUM)
+
+        test_acc = ""
+        if (not args.no_eval) and info.rank == 0:
+            model_for_eval = net.module if hasattr(net, "module") else net
+            test_acc = f"{evaluate(model_for_eval, device, data_dir, args.num_workers):.2f}"
+
+        if info.enabled:
+            dist.barrier()
+
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         epoch_time = time.perf_counter() - t0
 
-        loss_sum_t = torch.tensor(loss_sum, device=device)
-        sample_count_t = torch.tensor(sample_count, device=device, dtype=torch.long)
         epoch_time_t = torch.tensor(epoch_time, device=device)
         if info.enabled:
-            dist.all_reduce(loss_sum_t, op=dist.ReduceOp.SUM)
-            dist.all_reduce(sample_count_t, op=dist.ReduceOp.SUM)
             dist.all_reduce(epoch_time_t, op=dist.ReduceOp.MAX)
 
         total_samples = int(sample_count_t.item())
         train_loss = float(loss_sum_t.item()) / max(1, total_samples)
         epoch_time_sec = float(epoch_time_t.item())
         images_per_sec = 0.0 if epoch_time_sec <= 0 else (total_samples / epoch_time_sec)
-
-        test_acc = ""
-        if (not args.no_eval) and info.rank == 0:
-            model_for_eval = net.module if hasattr(net, "module") else net
-            test_acc = f"{evaluate(model_for_eval, device, data_dir, args.num_workers):.2f}"
 
         if info.rank == 0:
             row: dict[str, object] = {
