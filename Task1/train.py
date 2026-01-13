@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import time
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,8 @@ def main() -> None:
     )
 
     net = create_model(args.model).to(device)
+    param_count = sum(p.numel() for p in net.parameters())
+    print(f"Model: {args.model} | params: {param_count:,}")
     criterion = nn.CrossEntropyLoss(label_smoothing=float(args.label_smoothing))
 
     if args.optimizer == "sgd":
@@ -230,6 +233,10 @@ def main() -> None:
         epoch_total = 0
         epoch_correct = 0
         net.train()
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
         for i, (inputs, labels) in enumerate(trainloader, 0):
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -264,11 +271,19 @@ def main() -> None:
                 print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / denom:.3f} | lr: {lr:.5g} | acc: {train_acc:.2f}%")
                 running_loss = 0.0
 
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        train_time_sec = time.perf_counter() - t0
+        train_img_per_sec = 0.0 if train_time_sec <= 0 else (epoch_total / train_time_sec)
+
         if scheduler is not None:
             scheduler.step()
 
         train_acc = 0.0 if epoch_total == 0 else (epoch_correct / epoch_total)
-        msg = f"Epoch {epoch + 1}/{args.epochs} | train acc: {100.0 * train_acc:.2f}%"
+        msg = (
+            f"Epoch {epoch + 1}/{args.epochs} | train acc: {100.0 * train_acc:.2f}%"
+            f" | train time: {train_time_sec:.2f}s | train img/s: {train_img_per_sec:.1f}"
+        )
         if valloader is not None:
             val_loss, val_acc = eval_loader(valloader)
             msg += f" | val loss: {val_loss:.4f} | val acc: {100.0 * val_acc:.2f}%"
