@@ -35,15 +35,27 @@ Task1/
 
 可选参数：
 
+- `--model`（默认 `cnn`，可选 `cnn_bn`，通常更高准确率）
 - `--epochs`（默认 2）
 - `--batch-size`（默认 4）
 - `--lr`（默认 1e-3）
+- `--optimizer`（默认 `sgd`，可选 `adamw`）
+- `--scheduler`（默认 `none`，可选 `step`/`cosine`）
+- `--augment/--no-augment`（默认开启数据增强）
+- `--val-split`（默认 0.1，用训练集切出验证集，避免边训边盯 test）
 - `--num-workers`（默认 0，macOS 建议保持 0）
 - `--data-dir`（默认 `Task1/data`）
 - `--ckpt`（默认 `Task1/checkpoints/cifar_net.pth`）
+- `--best-ckpt`（默认 `Task1/checkpoints/cifar_net_best.pth`）
 - `--loss-csv`（默认 `Task1/outputs/loss.csv`）
 - `--loss-plot`（默认 `Task1/outputs/loss_curve.png`）
 - `--device`（默认自动选择 cuda/cpu）
+
+### （更高准确率）参数
+
+在不改代码的前提下，通常下面这套在 CIFAR-10 上会比默认参数更好：
+
+- `python Task1/train.py --model cnn_bn --epochs 50 --batch-size 128 --optimizer sgd --lr 0.1 --momentum 0.9 --weight-decay 5e-4 --scheduler cosine --augment --val-split 0.1`
 
 ### 绘制 loss curve
 
@@ -52,10 +64,11 @@ Task1/
 - `Task1/outputs/loss.csv`
 - `Task1/outputs/loss_curve.png`
 
-如果你已经有 `loss.csv`，也可以单独绘图：
+如果已经有 `loss.csv`，也可以单独绘图：
 
 - `python Task1/plot_loss.py --csv Task1/outputs/loss.csv --out Task1/outputs/loss_curve.png`
 
 ### 评估
 
 - `python Task1/eval.py --ckpt Task1/checkpoints/cifar_net.pth`
+- 如果想用训练过程中保存的最佳验证集模型：`python Task1/eval.py --ckpt Task1/checkpoints/cifar_net_best.pth`

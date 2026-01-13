@@ -12,9 +12,11 @@ import torchvision
 import torchvision.transforms as transforms
 
 try:
-    from Task1.models.cnn import Cifar10CNN
+    from Task1.models.cnn import create_model
+    from Task1.utils import build_transforms, seed_everything
 except ModuleNotFoundError:
-    from models.cnn import Cifar10CNN
+    from models.cnn import create_model
+    from utils import build_transforms, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,9 +25,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--momentum", type=float, default=0.9)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--optimizer", type=str, default="sgd", choices=["sgd", "adamw"])
+    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "step", "cosine"])
+    parser.add_argument("--step-size", type=int, default=20)
+    parser.add_argument("--gamma", type=float, default=0.1)
+    parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--data-dir", type=str, default="")
     parser.add_argument("--ckpt", type=str, default="")
+    parser.add_argument("--best-ckpt", type=str, default="")
+    parser.add_argument("--model", type=str, default="cnn", choices=["cnn", "cnn_bn"])
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--val-split", type=float, default=0.1)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--log-every", type=int, default=2000)
     parser.add_argument(
         "--loss-csv",
         type=str,
@@ -95,11 +110,18 @@ def maybe_save_loss_plot(rows: list[dict[str, Any]], path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
+    seed_everything(args.seed)
 
     task_dir = Path(__file__).resolve().parent
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else (task_dir / "data")
     ckpt_path = Path(args.ckpt).expanduser() if args.ckpt else (task_dir / "checkpoints" / "cifar_net.pth")
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    best_ckpt_path = (
+        Path(args.best_ckpt).expanduser()
+        if args.best_ckpt
+        else ckpt_path.with_name(f"{ckpt_path.stem}_best{ckpt_path.suffix}")
+    )
+    best_ckpt_path.parent.mkdir(parents=True, exist_ok=True)
     outputs_dir = task_dir / "outputs"
     loss_csv_path = Path(args.loss_csv).expanduser() if args.loss_csv else (outputs_dir / "loss.csv")
     loss_plot_path = Path(args.loss_plot).expanduser() if args.loss_plot else (outputs_dir / "loss_curve.png")
@@ -107,45 +129,119 @@ def main() -> None:
     device = get_device(args.device)
     print(f"Using device: {device}")
 
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-
-    trainset = torchvision.datasets.CIFAR10(
+    train_transform, test_transform = build_transforms(args.augment)
+    train_dataset_aug = torchvision.datasets.CIFAR10(
         root=str(data_dir),
         train=True,
         download=True,
-        transform=transform,
+        transform=train_transform,
     )
+    train_dataset_plain = torchvision.datasets.CIFAR10(
+        root=str(data_dir),
+        train=True,
+        download=False,
+        transform=test_transform,
+    )
+
+    generator = torch.Generator().manual_seed(args.seed)
+    total_size = len(train_dataset_aug)
+    val_size = int(total_size * max(0.0, min(0.9, float(args.val_split))))
+    indices = torch.randperm(total_size, generator=generator).tolist()
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+
+    trainset: torch.utils.data.Dataset[Any] = torch.utils.data.Subset(train_dataset_aug, train_indices)
+    valset: torch.utils.data.Dataset[Any] | None = (
+        torch.utils.data.Subset(train_dataset_plain, val_indices) if val_size > 0 else None
+    )
+
     trainloader = torch.utils.data.DataLoader(
         trainset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=(device.type == "cuda"),
+        generator=generator,
+    )
+    valloader = (
+        torch.utils.data.DataLoader(
+            valset,
+            batch_size=max(64, args.batch_size),
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+        )
+        if valset is not None
+        else None
     )
 
-    net = Cifar10CNN().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum)
+    net = create_model(args.model).to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=float(args.label_smoothing))
+
+    if args.optimizer == "sgd":
+        optimizer = optim.SGD(
+            net.parameters(),
+            lr=args.lr,
+            momentum=args.momentum,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = optim.AdamW(
+            net.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+
+    if args.scheduler == "cosine":
+        scheduler: Any = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    elif args.scheduler == "step":
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.gamma)
+    else:
+        scheduler = None
+
+    use_amp = bool(args.amp and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     loss_rows: list[dict[str, Any]] = []
     global_step = 0
+    best_val_acc = -1.0
+
+    @torch.no_grad()
+    def eval_loader(loader: torch.utils.data.DataLoader) -> tuple[float, float]:
+        net.eval()
+        total = 0
+        correct = 0
+        loss_sum = 0.0
+        for inputs, labels in loader:
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            outputs = net(inputs)
+            loss = criterion(outputs, labels)
+            loss_sum += float(loss.item()) * int(labels.size(0))
+            _, predicted = torch.max(outputs, 1)
+            total += int(labels.size(0))
+            correct += int((predicted == labels).sum().item())
+        avg_loss = 0.0 if total == 0 else (loss_sum / total)
+        acc = 0.0 if total == 0 else (correct / total)
+        return avg_loss, acc
+
     for epoch in range(args.epochs):
         running_loss = 0.0
+        epoch_total = 0
+        epoch_correct = 0
+        net.train()
         for i, (inputs, labels) in enumerate(trainloader, 0):
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
             optimizer.zero_grad()
+            with torch.autocast(device_type=device.type, enabled=use_amp):
+                outputs = net(inputs)
+                loss = criterion(outputs, labels)
 
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item()
             loss_rows.append(
@@ -157,13 +253,38 @@ def main() -> None:
                 }
             )
             global_step += 1
-            if i % 2000 == 1999:
-                print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 2000:.3f}")
+            _, predicted = torch.max(outputs, 1)
+            epoch_total += int(labels.size(0))
+            epoch_correct += int((predicted == labels).sum().item())
+
+            if args.log_every > 0 and i % args.log_every == (args.log_every - 1):
+                denom = float(args.log_every)
+                train_acc = 0.0 if epoch_total == 0 else (100.0 * epoch_correct / epoch_total)
+                lr = optimizer.param_groups[0].get("lr", 0.0)
+                print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / denom:.3f} | lr: {lr:.5g} | acc: {train_acc:.2f}%")
                 running_loss = 0.0
 
+        if scheduler is not None:
+            scheduler.step()
+
+        train_acc = 0.0 if epoch_total == 0 else (epoch_correct / epoch_total)
+        msg = f"Epoch {epoch + 1}/{args.epochs} | train acc: {100.0 * train_acc:.2f}%"
+        if valloader is not None:
+            val_loss, val_acc = eval_loader(valloader)
+            msg += f" | val loss: {val_loss:.4f} | val acc: {100.0 * val_acc:.2f}%"
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                torch.save(
+                    {"model": args.model, "state_dict": net.state_dict(), "epoch": epoch + 1, "val_acc": val_acc},
+                    best_ckpt_path,
+                )
+        print(msg)
+
     print("Finished Training")
-    torch.save(net.state_dict(), ckpt_path)
+    torch.save({"model": args.model, "state_dict": net.state_dict(), "epoch": args.epochs}, ckpt_path)
     print(f"Saved checkpoint to: {ckpt_path}")
+    if best_ckpt_path.exists():
+        print(f"Saved best checkpoint to: {best_ckpt_path}")
     write_loss_csv(loss_rows, loss_csv_path)
     print(f"Saved loss CSV to: {loss_csv_path}")
     maybe_save_loss_plot(loss_rows, loss_plot_path)
