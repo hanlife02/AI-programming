@@ -53,7 +53,7 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 - `--loss-plot`: 自定义 loss curve 图片输出路径
 - `--loss-csv`: 可选保存 loss 到 CSV（与 `--loss-log-every` 配合）
 - `--loss-log-every`: 每 N step 记录一次 loss（默认 10；N 越大越省 CPU/内存，但曲线更稀疏）
-- `--log-every`: 每 N step 刷新一次进度条（默认 50；可明显减少终端输出带来的开销）
+- `--log-every`: 每 N step 刷新一次进度条（默认 1；可明显减少终端输出带来的开销）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
 - `--wd-mode weights`: 仅对权重（ndim>=2）做 weight decay（更常见、更容易提升验证集 acc）；`--wd-mode all` 为旧行为（所有参数都 decay）
 - `--warmup-epochs`: 学习率线性 warmup（默认 5），通常能让训练更稳定
