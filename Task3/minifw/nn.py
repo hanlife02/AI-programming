@@ -168,73 +168,6 @@ class Sequential(Module):
         return x
 
 
-@dataclass
-class ConvReLU(Module):
-    conv: Conv2d
-    relu: ReLU
-
-    def __init__(
-        self,
-        in_ch: int,
-        out_ch: int,
-        kernel: int = 3,
-        stride: int = 1,
-        padding: int = 1,
-        bias: bool = True,
-        device: torch.device | None = None,
-    ):
-        self.conv = Conv2d(in_ch, out_ch, kernel=kernel, stride=stride, padding=padding, bias=bias, device=device)
-        self.relu = ReLU()
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.relu(self.conv(x))
-
-
-class DLALikeCifarNet(Module):
-    """A deeper CIFAR-10 CNN that only uses the custom CUDA ops (Conv/ReLU/GAP/Linear)."""
-
-    def __init__(self, device: torch.device | None = None) -> None:
-        device = device or torch.device("cuda")
-        self.stem = ConvReLU(3, 16, kernel=3, stride=1, padding=1, device=device)
-
-        self.level0 = [ConvReLU(16, 16, kernel=3, stride=1, padding=1, device=device)]
-        self.level1 = [
-            ConvReLU(16, 32, kernel=3, stride=2, padding=1, device=device),
-            ConvReLU(32, 32, kernel=3, stride=1, padding=1, device=device),
-        ]
-        self.level2 = [
-            ConvReLU(32, 64, kernel=3, stride=2, padding=1, device=device),
-            ConvReLU(64, 64, kernel=3, stride=1, padding=1, device=device),
-        ]
-        self.level3 = [
-            ConvReLU(64, 128, kernel=3, stride=2, padding=1, device=device),
-            ConvReLU(128, 128, kernel=3, stride=1, padding=1, device=device),
-        ]
-        self.level4 = [
-            ConvReLU(128, 256, kernel=3, stride=2, padding=1, device=device),
-            ConvReLU(256, 256, kernel=3, stride=1, padding=1, device=device),
-        ]
-
-        self.gap = GlobalAvgPool2d()
-        self.fc = Linear(256, 10, device=device)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.stem(x)
-        for layer in self.level0:
-            x = layer(x)
-        for layer in self.level1:
-            x = layer(x)
-        for layer in self.level2:
-            x = layer(x)
-        for layer in self.level3:
-            x = layer(x)
-        for layer in self.level4:
-            x = layer(x)
-        x = self.gap(x)
-        x = self.fc(x)
-        return x
-
-
 _VGG_CFG = {
     "VGG11": [64, "M", 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
     "VGG13": [64, 64, "M", 128, 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
@@ -246,13 +179,15 @@ _VGG_CFG = {
 class VGGNet(Module):
     def __init__(self, cfg_name: str = "VGG16", num_classes: int = 10, device: torch.device | None = None) -> None:
         raise RuntimeError(
-            "VGGNet has been replaced by VGG (Conv+BN+ReLU + Flatten head) to match the reference implementation. "
-            "Use VGG(vgg_name='VGG16') instead."
+            "VGGNet has been replaced by MyNet (VGG-style Conv+BN+ReLU blocks + Flatten head). "
+            "Use MyNet(vgg_name='VGG16') instead."
         )
 
 
-class VGG(Module):
-    """VGG11/13/16/19 in the style of the reference code:
+class MyNet(Module):
+    """A VGG-style CIFAR-10 network (Conv+BN+ReLU blocks + MaxPool, then Linear head).
+
+    This is the only model kept for Task3 (previous DLA-like and simple CNN baselines removed).
     - features: Conv2d -> BatchNorm2d -> ReLU, and MaxPool2d for 'M'
     - head: flatten -> Linear(512 -> num_classes)
     """
@@ -285,26 +220,3 @@ class VGG(Module):
                 in_channels = out_channels
         layers.append(AvgPool2d(kernel=1, stride=1))
         return Sequential(*layers)
-
-
-class SimpleCifarNet(Module):
-    def __init__(self, device: torch.device | None = None) -> None:
-        device = device or torch.device("cuda")
-        self.conv1 = Conv2d(3, 32, kernel=3, padding=1, device=device)
-        self.conv2 = Conv2d(32, 64, kernel=3, padding=1, device=device)
-        self.pool1 = MaxPool2d(2, 2)
-        self.conv3 = Conv2d(64, 128, kernel=3, padding=1, device=device)
-        self.pool2 = MaxPool2d(2, 2)
-        self.relu = ReLU()
-        self.gap = GlobalAvgPool2d()
-        self.fc = Linear(128, 10, device=device)
-
-    def forward(self, x: Tensor) -> Tensor:
-        x = self.relu(self.conv1(x))
-        x = self.relu(self.conv2(x))
-        x = self.pool1(x)
-        x = self.relu(self.conv3(x))
-        x = self.pool2(x)
-        x = self.gap(x)
-        x = self.fc(x)
-        return x

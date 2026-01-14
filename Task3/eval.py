@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 
 try:
-    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
+    from Task3.minifw.nn import MyNet
     from Task3.minifw.tensor import Tensor
 except ModuleNotFoundError:  # supports: cd Task3 && python eval.py
-    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
+    from minifw.nn import MyNet
     from minifw.tensor import Tensor
 
 
@@ -110,15 +110,11 @@ def main() -> None:
     ckpt_path = Path(args.ckpt).expanduser() if args.ckpt else (task_dir / "checkpoint" / "ckpt.pth")
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    arch = str(ckpt.get("arch", "simple"))
-    if arch == "dla":
-        model = DLALikeCifarNet(device=device)
-    elif arch == "simple":
-        model = SimpleCifarNet(device=device)
-    elif arch == "vgg16":
-        model = VGG("VGG16", device=device)
+    arch = str(ckpt.get("arch", "mynet"))
+    if arch in {"mynet", "vgg16"}:
+        model = MyNet(vgg_name="VGG16", device=device)
     else:
-        raise ValueError(f"Unknown checkpoint arch: {arch}")
+        raise ValueError(f"Unknown checkpoint arch: {arch} (supported: 'mynet', legacy: 'vgg16')")
     state = ckpt.get("net", {})
     if bool(args.use_ema):
         ema_state = ckpt.get("ema", None)

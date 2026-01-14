@@ -46,7 +46,7 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 
 常用参数：
 
-- `--model`: `vgg16`（默认）、`dla` 或 `simple`
+- `--model`: `mynet`（默认且唯一）
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: checkpoint 路径（默认 `Task3/checkpoint/ckpt.pth`）
 - `--save-loss-plot/--no-save-loss-plot`: 训练结束自动保存 loss curve（默认开启，保存到 `Task3/outputs/loss_curve.png`）
