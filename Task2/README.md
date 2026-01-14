@@ -119,5 +119,5 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py
 对已训练的 checkpoint 做一次单卡评估：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python Task2/eval.py --ckpt Task2/outputs/ddp2/ckpt.pth
+CUDA_VISIBLE_DEVICES=0 python Task2/eval.py --ckpt Task2/outputs/ddp2/ckpt_best.pth
 ```
