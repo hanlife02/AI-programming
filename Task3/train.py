@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=5e-4)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--val-split", type=float, default=0.0)
+    p.add_argument("--val-split", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--no-augment", action="store_true")
