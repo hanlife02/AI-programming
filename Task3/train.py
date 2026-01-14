@@ -160,6 +160,13 @@ def broadcast_params(info: DistInfo, model: SimpleCifarNet) -> None:
         dist.broadcast(p.data, src=0)
 
 
+def broadcast_buffers(info: DistInfo, model: SimpleCifarNet) -> None:
+    if not info.enabled:
+        return
+    for _, b in model.named_buffers().items():
+        dist.broadcast(b, src=0)
+
+
 def build_grad_sync(params: list[Tensor], info: DistInfo) -> Callable[[], None]:
     if not info.enabled:
         def _noop() -> None:
@@ -235,21 +242,24 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
 
     x = Tensor(images.contiguous(), requires_grad=False)
     t1 = model.conv1(x)
-    t2 = t1.relu()
-    t3 = model.conv2(t2)
-    t4 = t3.relu()
-    t5 = model.pool1(t4)
-    t6 = model.conv3(t5)
-    t7 = t6.relu()
-    t8 = model.pool2(t7)
-    t9 = model.gap(t8)
-    logits = model.fc(t9)
+    t2 = model.bn1(t1)
+    t3 = t2.relu()
+    t4 = model.conv2(t3)
+    t5 = model.bn2(t4)
+    t6 = t5.relu()
+    t7 = model.pool1(t6)
+    t8 = model.conv3(t7)
+    t9 = model.bn3(t8)
+    t10 = t9.relu()
+    t11 = model.pool2(t10)
+    t12 = model.gap(t11)
+    logits = model.fc(t12)
     loss = logits.cross_entropy(labels)
 
     if info.rank == 0:
         print(f"[debug] conv1 out: {_tensor_stats(t1.data)}", flush=True)
-        print(f"[debug] pool2 out: {_tensor_stats(t8.data)}", flush=True)
-        print(f"[debug] gap out : {_tensor_stats(t9.data)}", flush=True)
+        print(f"[debug] pool2 out: {_tensor_stats(t11.data)}", flush=True)
+        print(f"[debug] gap out : {_tensor_stats(t12.data)}", flush=True)
         print(f"[debug] logits  : {_tensor_stats(logits.data)}", flush=True)
         print(f"[debug] loss    : {loss.data.item():.6f}", flush=True)
 
@@ -382,6 +392,7 @@ def main() -> None:
     model = SimpleCifarNet(device=device)
     rank0_print(info, f"model params: {sum(int(p.data.numel()) for p in model.parameters()):,}")
     broadcast_params(info, model)
+    broadcast_buffers(info, model)
 
     params = list(model.parameters())
     optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -470,6 +481,7 @@ def main() -> None:
             )
 
             if (not args.no_eval) and val_loader is not None:
+                broadcast_buffers(info, model)
                 model.eval()
                 v_correct = 0
                 v_seen = 0
@@ -498,6 +510,7 @@ def main() -> None:
                             "val_acc": val_acc,
                             "world_size": info.world_size,
                             "model": {k: v.data for k, v in model.named_parameters().items()},
+                            "buffers": {k: v for k, v in model.named_buffers().items()},
                         },
                         ckpt_path,
                     )

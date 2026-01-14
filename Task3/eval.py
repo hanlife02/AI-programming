@@ -109,6 +109,13 @@ def main() -> None:
             raise KeyError(f"Missing parameter in checkpoint: {name}")
         p.data.copy_(state[name].to(device))
 
+    buffers = ckpt.get("buffers", {})
+    for name, b in model.named_buffers().items():
+        if name in buffers:
+            b.copy_(buffers[name].to(device))
+
+    model.eval()
+
     if info.enabled and info.rank != 0:
         dist.barrier()
         ds = torchvision.datasets.CIFAR10(root=str(data_dir), train=False, download=False, transform=build_test_transform())
@@ -156,4 +163,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

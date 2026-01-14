@@ -392,6 +392,134 @@ __global__ void global_avg_pool_bwd_kernel(const float* __restrict__ grad_out, f
     grad_x[i] = go / (float)(H * W);
 }
 
+__global__ void batchnorm2d_stats_kernel(const float* __restrict__ x, float* __restrict__ mean, float* __restrict__ var,
+                                        float* __restrict__ invstd, int N, int C, int H, int W, float eps) {
+    __shared__ float shared_sum[32];
+    __shared__ float shared_sumsq[32];
+    int c = (int)blockIdx.x;
+    if (c >= C) return;
+    const int HW = H * W;
+    const int M = N * HW;
+    float sum = 0.0f;
+    float sumsq = 0.0f;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        float v = x[((n * C + c) * H) * W + hw];
+        sum += v;
+        sumsq += v * v;
+    }
+    float sum_g = blockReduceSum(sum, shared_sum);
+    float sumsq_g = blockReduceSum(sumsq, shared_sumsq);
+    if (threadIdx.x == 0) {
+        float m = sum_g / (float)M;
+        float vv = sumsq_g / (float)M - m * m;
+        if (vv < 0.0f) vv = 0.0f;
+        mean[c] = m;
+        var[c] = vv;
+        invstd[c] = rsqrtf(vv + eps);
+    }
+}
+
+__global__ void batchnorm2d_forward_kernel(const float* __restrict__ x, const float* __restrict__ weight,
+                                          const float* __restrict__ bias, const float* __restrict__ mean,
+                                          const float* __restrict__ invstd, float* __restrict__ y, int total, int C,
+                                          int H, int W) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    int tmp = i / (H * W);
+    int c = tmp % C;
+    (void)H;
+    (void)W;
+    float m = mean[c];
+    float iv = invstd[c];
+    float w = weight[c];
+    float b = bias[c];
+    float v = x[i];
+    y[i] = (v - m) * iv * w + b;
+}
+
+__global__ void batchnorm2d_forward_eval_kernel(const float* __restrict__ x, const float* __restrict__ weight,
+                                               const float* __restrict__ bias, const float* __restrict__ running_mean,
+                                               const float* __restrict__ running_var, float* __restrict__ y, int total,
+                                               int C, int H, int W, float eps) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    int tmp = i / (H * W);
+    int c = tmp % C;
+    (void)H;
+    (void)W;
+    float m = running_mean[c];
+    float iv = rsqrtf(running_var[c] + eps);
+    float w = weight[c];
+    float b = bias[c];
+    float v = x[i];
+    y[i] = (v - m) * iv * w + b;
+}
+
+__global__ void batchnorm2d_backward_reduce_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
+                                                  const float* __restrict__ mean, const float* __restrict__ invstd,
+                                                  float* __restrict__ sum_dy, float* __restrict__ sum_dy_xmu,
+                                                  float* __restrict__ grad_w, float* __restrict__ grad_b, int N, int C,
+                                                  int H, int W) {
+    __shared__ float shared_sum1[32];
+    __shared__ float shared_sum2[32];
+    int c = (int)blockIdx.x;
+    if (c >= C) return;
+    const int HW = H * W;
+    const int M = N * HW;
+    float s1 = 0.0f;
+    float s2 = 0.0f;
+    float m = mean[c];
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        int idx = ((n * C + c) * H) * W + hw;
+        float dy = grad_out[idx];
+        float xmu = x[idx] - m;
+        s1 += dy;
+        s2 += dy * xmu;
+    }
+    float s1g = blockReduceSum(s1, shared_sum1);
+    float s2g = blockReduceSum(s2, shared_sum2);
+    if (threadIdx.x == 0) {
+        sum_dy[c] = s1g;
+        sum_dy_xmu[c] = s2g;
+        if (grad_b) grad_b[c] = s1g;
+        if (grad_w) grad_w[c] = s2g * invstd[c];
+    }
+}
+
+__global__ void batchnorm2d_backward_dx_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
+                                              const float* __restrict__ weight, const float* __restrict__ mean,
+                                              const float* __restrict__ invstd, const float* __restrict__ sum_dy,
+                                              const float* __restrict__ sum_dy_xmu, float* __restrict__ grad_x,
+                                              int total, int C, int H, int W, float inv_m) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) return;
+    int tmp = i / (H * W);
+    int c = tmp % C;
+    float dy = grad_out[i];
+    float xmu = x[i] - mean[c];
+    float iv = invstd[c];
+    float w = weight[c];
+    float s1 = sum_dy[c];
+    float s2 = sum_dy_xmu[c];
+    float iv2 = iv * iv;
+    float M = 1.0f / inv_m;
+    grad_x[i] = inv_m * w * iv * (M * dy - s1 - xmu * iv2 * s2);
+}
+
+__global__ void batchnorm2d_update_running_kernel(float* __restrict__ running_mean, float* __restrict__ running_var,
+                                                 const float* __restrict__ batch_mean, const float* __restrict__ batch_var,
+                                                 int C, float momentum) {
+    int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= C) return;
+    float m = momentum;
+    running_mean[c] = running_mean[c] * (1.0f - m) + batch_mean[c] * m;
+    running_var[c] = running_var[c] * (1.0f - m) + batch_var[c] * m;
+}
+
 __global__ void linear_fwd_kernel(const float* __restrict__ x, const float* __restrict__ w,
                                   const float* __restrict__ b, float* __restrict__ y, int N, int In, int Out,
                                   bool has_bias) {
@@ -790,6 +918,138 @@ torch::Tensor global_avg_pool2d_backward(torch::Tensor grad_out, int64_t h, int6
     global_avg_pool_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), grad_x.data_ptr<float>(),
                                                               N, C, (int)h, (int)w);
     return grad_x;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_forward_train(torch::Tensor x,
+                                                                                                 torch::Tensor weight,
+                                                                                                 torch::Tensor bias,
+                                                                                                 double eps) {
+    check_float_cuda(x, "x");
+    check_float_cuda(weight, "weight");
+    check_float_cuda(bias, "bias");
+    TORCH_CHECK(x.dim() == 4, "x must be 4D (N, C, H, W)");
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+    TORCH_CHECK(weight.dim() == 1 && (int)weight.numel() == C, "weight must be 1D (C)");
+    TORCH_CHECK(bias.dim() == 1 && (int)bias.numel() == C, "bias must be 1D (C)");
+
+    auto y = torch::empty_like(x);
+    auto mean = torch::empty({C}, x.options());
+    auto var = torch::empty({C}, x.options());
+    auto invstd = torch::empty({C}, x.options());
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+
+    int threads = 256;
+    batchnorm2d_stats_kernel<<<C, threads, 0, stream>>>(x.data_ptr<float>(), mean.data_ptr<float>(), var.data_ptr<float>(),
+                                                        invstd.data_ptr<float>(), N, C, H, W, (float)eps);
+
+    int total = (int)x.numel();
+    int blocks = (total + threads - 1) / threads;
+    batchnorm2d_forward_kernel<<<blocks, threads, 0, stream>>>(
+        x.data_ptr<float>(), weight.data_ptr<float>(), bias.data_ptr<float>(), mean.data_ptr<float>(), invstd.data_ptr<float>(),
+        y.data_ptr<float>(), total, C, H, W);
+    return {y, mean, invstd, var};
+}
+
+torch::Tensor batchnorm2d_forward_eval(torch::Tensor x, torch::Tensor weight, torch::Tensor bias,
+                                       torch::Tensor running_mean, torch::Tensor running_var, double eps) {
+    check_float_cuda(x, "x");
+    check_float_cuda(weight, "weight");
+    check_float_cuda(bias, "bias");
+    check_float_cuda(running_mean, "running_mean");
+    check_float_cuda(running_var, "running_var");
+    TORCH_CHECK(x.dim() == 4, "x must be 4D (N, C, H, W)");
+    const int C = (int)x.size(1);
+    TORCH_CHECK(weight.dim() == 1 && (int)weight.numel() == C, "weight must be 1D (C)");
+    TORCH_CHECK(bias.dim() == 1 && (int)bias.numel() == C, "bias must be 1D (C)");
+    TORCH_CHECK(running_mean.dim() == 1 && (int)running_mean.numel() == C, "running_mean must be 1D (C)");
+    TORCH_CHECK(running_var.dim() == 1 && (int)running_var.numel() == C, "running_var must be 1D (C)");
+
+    const int N = (int)x.size(0);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+    auto y = torch::empty_like(x);
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    int total = (int)x.numel();
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    batchnorm2d_forward_eval_kernel<<<blocks, threads, 0, stream>>>(
+        x.data_ptr<float>(), weight.data_ptr<float>(), bias.data_ptr<float>(), running_mean.data_ptr<float>(),
+        running_var.data_ptr<float>(), y.data_ptr<float>(), total, C, H, W, (float)eps);
+    return y;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_backward(torch::Tensor grad_out, torch::Tensor x,
+                                                                             torch::Tensor weight, torch::Tensor mean,
+                                                                             torch::Tensor invstd, bool need_grad_x,
+                                                                             bool need_grad_w, bool need_grad_b) {
+    check_float_cuda(grad_out, "grad_out");
+    check_float_cuda(x, "x");
+    check_float_cuda(weight, "weight");
+    check_float_cuda(mean, "mean");
+    check_float_cuda(invstd, "invstd");
+    TORCH_CHECK(x.dim() == 4, "x must be 4D (N, C, H, W)");
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+    TORCH_CHECK((int)grad_out.numel() == (int)x.numel(), "grad_out must match x numel");
+    TORCH_CHECK(weight.dim() == 1 && (int)weight.numel() == C, "weight must be 1D (C)");
+    TORCH_CHECK(mean.dim() == 1 && (int)mean.numel() == C, "mean must be 1D (C)");
+    TORCH_CHECK(invstd.dim() == 1 && (int)invstd.numel() == C, "invstd must be 1D (C)");
+
+    auto grad_x = need_grad_x ? torch::empty_like(x) : torch::empty({0}, x.options());
+    auto grad_w = need_grad_w ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
+    auto grad_b = need_grad_b ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
+    auto sum_dy = torch::empty({C}, x.options());
+    auto sum_dy_xmu = torch::empty({C}, x.options());
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    int threads = 256;
+    batchnorm2d_backward_reduce_kernel<<<C, threads, 0, stream>>>(
+        grad_out.data_ptr<float>(), x.data_ptr<float>(), mean.data_ptr<float>(), invstd.data_ptr<float>(),
+        sum_dy.data_ptr<float>(), sum_dy_xmu.data_ptr<float>(), need_grad_w ? grad_w.data_ptr<float>() : nullptr,
+        need_grad_b ? grad_b.data_ptr<float>() : nullptr, N, C, H, W);
+
+    if (need_grad_x) {
+        int total = (int)x.numel();
+        int blocks = (total + threads - 1) / threads;
+        float inv_m = 1.0f / (float)(N * H * W);
+        batchnorm2d_backward_dx_kernel<<<blocks, threads, 0, stream>>>(
+            grad_out.data_ptr<float>(), x.data_ptr<float>(), weight.data_ptr<float>(), mean.data_ptr<float>(),
+            invstd.data_ptr<float>(), sum_dy.data_ptr<float>(), sum_dy_xmu.data_ptr<float>(), grad_x.data_ptr<float>(),
+            total, C, H, W, inv_m);
+    }
+
+    return {grad_x, grad_w, grad_b};
+}
+
+void batchnorm2d_update_running_(torch::Tensor running_mean, torch::Tensor running_var, torch::Tensor batch_mean,
+                                torch::Tensor batch_var, double momentum) {
+    check_float_cuda(running_mean, "running_mean");
+    check_float_cuda(running_var, "running_var");
+    check_float_cuda(batch_mean, "batch_mean");
+    check_float_cuda(batch_var, "batch_var");
+    TORCH_CHECK(running_mean.dim() == 1, "running_mean must be 1D");
+    const int C = (int)running_mean.numel();
+    TORCH_CHECK((int)running_var.numel() == C, "running_var must match C");
+    TORCH_CHECK((int)batch_mean.numel() == C, "batch_mean must match C");
+    TORCH_CHECK((int)batch_var.numel() == C, "batch_var must match C");
+
+    c10::cuda::CUDAGuard guard(running_mean.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    int threads = 256;
+    int blocks = (C + threads - 1) / threads;
+    batchnorm2d_update_running_kernel<<<blocks, threads, 0, stream>>>(
+        running_mean.data_ptr<float>(), running_var.data_ptr<float>(), batch_mean.data_ptr<float>(),
+        batch_var.data_ptr<float>(), C, (float)momentum);
 }
 
 torch::Tensor linear_forward(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b) {

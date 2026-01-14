@@ -3,6 +3,7 @@
 本目录实现了一个最小但可训练的“自研”CNN框架：
 
 - 卷积/反传、ReLU、MaxPool、GlobalAvgPool、Linear、CrossEntropy 都由 `CUDA + pybind11` 扩展提供
+- BatchNorm2d（含训练/推理 forward、backward、running stats 更新）也由 `CUDA + pybind11` 扩展提供
 - Python 侧实现自动微分（反向图）与 SGD 优化器
 - 数据处理允许使用 `torchvision`（符合 `hw.md` 的 Tips）
 

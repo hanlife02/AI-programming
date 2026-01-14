@@ -27,6 +27,19 @@ torch::Tensor maxpool2d_backward(torch::Tensor grad_out, torch::Tensor indices, 
 torch::Tensor global_avg_pool2d_forward(torch::Tensor x);
 torch::Tensor global_avg_pool2d_backward(torch::Tensor grad_out, int64_t h, int64_t w);
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_forward_train(torch::Tensor x,
+                                                                                                 torch::Tensor weight,
+                                                                                                 torch::Tensor bias,
+                                                                                                 double eps);
+torch::Tensor batchnorm2d_forward_eval(torch::Tensor x, torch::Tensor weight, torch::Tensor bias,
+                                       torch::Tensor running_mean, torch::Tensor running_var, double eps);
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_backward(torch::Tensor grad_out, torch::Tensor x,
+                                                                             torch::Tensor weight, torch::Tensor mean,
+                                                                             torch::Tensor invstd, bool need_grad_x,
+                                                                             bool need_grad_w, bool need_grad_b);
+void batchnorm2d_update_running_(torch::Tensor running_mean, torch::Tensor running_var, torch::Tensor batch_mean,
+                                torch::Tensor batch_var, double momentum);
+
 torch::Tensor linear_forward(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b);
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> linear_backward(
     torch::Tensor grad_out,
@@ -69,6 +82,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("maxpool2d_backward", &maxpool2d_backward, "maxpool2d backward (CUDA)");
     m.def("global_avg_pool2d_forward", &global_avg_pool2d_forward, "global avg pool2d forward (CUDA)");
     m.def("global_avg_pool2d_backward", &global_avg_pool2d_backward, "global avg pool2d backward (CUDA)");
+    m.def("batchnorm2d_forward_train", &batchnorm2d_forward_train, "batchnorm2d forward train (CUDA)");
+    m.def("batchnorm2d_forward_eval", &batchnorm2d_forward_eval, "batchnorm2d forward eval (CUDA)");
+    m.def("batchnorm2d_backward", &batchnorm2d_backward, "batchnorm2d backward (CUDA)");
+    m.def("batchnorm2d_update_running_", &batchnorm2d_update_running_, "batchnorm2d running stats update (CUDA)");
     m.def("linear_forward", &linear_forward, "linear forward (CUDA)");
     m.def("linear_backward", &linear_backward, "linear backward (CUDA)");
     m.def("cross_entropy_forward", &cross_entropy_forward, "cross entropy forward (CUDA)");
