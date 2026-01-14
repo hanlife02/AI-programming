@@ -17,6 +17,13 @@ python setup.py build_ext --inplace
 
 成功后会生成 `task3_ops.*.so`。
 
+如果你遇到类似 `nvcc fatal: Unsupported gpu architecture 'compute_120'` 的报错，通常是 **PyTorch 编译时的 CUDA 版本** 与 **本机 nvcc 版本** 不一致导致自动选择了 nvcc 不支持的架构。本项目的 `Task3/setup.py` 会自动过滤不支持的架构；你也可以手动指定：
+
+```bash
+# 仅为示例：按你的 GPU 计算能力调整（如 8.6 / 8.9 / 9.0）
+TASK3_CUDA_ARCH_LIST="8.6" python setup.py build_ext --inplace
+```
+
 ## 2) 训练
 
 ```bash
