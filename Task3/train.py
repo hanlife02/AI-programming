@@ -9,8 +9,10 @@ This file follows the same training loop style as the provided PyTorch reference
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -54,6 +56,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (if --ema)")
     p.add_argument("--data-dir", type=str, default="")
     p.add_argument("--ckpt", type=str, default="")
+    p.add_argument(
+        "--loss-csv",
+        type=str,
+        default="",
+        help="Path to save per-step loss as CSV (default: disabled).",
+    )
+    p.add_argument(
+        "--save-loss-plot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save a loss curve PNG at the end of training (default: enabled).",
+    )
+    p.add_argument(
+        "--loss-plot",
+        type=str,
+        default="",
+        help="Path to save loss curve image (default: Task3/outputs/loss_curve.png when --save-loss-plot is enabled).",
+    )
     return p.parse_args()
 
 
@@ -102,6 +122,51 @@ def scheduled_lr(args: argparse.Namespace, epoch: int) -> float:
     return base_lr
 
 
+def write_loss_csv(rows: list[dict[str, Any]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["global_step", "epoch", "batch_idx", "loss"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+
+def maybe_save_loss_plot(rows: list[dict[str, Any]], path: Path) -> None:
+    try:
+        import matplotlib.pyplot as plt  # type: ignore
+    except ImportError:
+        print("matplotlib not installed; skipping loss curve plot. Install via: pip install matplotlib")
+        return
+
+    if not rows:
+        print("No loss rows to plot; skipping.")
+        return
+
+    steps = [int(r["global_step"]) for r in rows]
+    losses = [float(r["loss"]) for r in rows]
+
+    ema_losses: list[float] = []
+    alpha = 0.05
+    ema = losses[0]
+    for loss in losses:
+        ema = alpha * loss + (1 - alpha) * ema
+        ema_losses.append(ema)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(9, 4.5))
+    plt.plot(steps, losses, linewidth=0.8, alpha=0.25, label="loss (raw)")
+    plt.plot(steps, ema_losses, linewidth=1.8, label=f"loss (EMA, alpha={alpha})")
+    plt.xlabel("global step")
+    plt.ylabel("loss")
+    plt.title("Task3 Training Loss Curve")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+
+
 @torch.no_grad()
 def test(net, device: torch.device, loader: torch.utils.data.DataLoader) -> float:
     net.eval()
@@ -133,6 +198,12 @@ def main() -> None:
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else (task_dir / "data")
     ckpt_path = Path(args.ckpt).expanduser() if args.ckpt else (task_dir / "checkpoint" / "ckpt.pth")
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+    loss_csv_path = Path(args.loss_csv).expanduser() if args.loss_csv else None
+    loss_plot_path = (
+        (Path(args.loss_plot).expanduser() if args.loss_plot else (task_dir / "outputs" / "loss_curve.png"))
+        if bool(args.save_loss_plot)
+        else None
+    )
 
     print("==> Preparing data..", flush=True)
     transform_train, transform_test = build_transforms(bool(args.augment), bool(args.autoaugment), float(args.random_erasing))
@@ -231,6 +302,10 @@ def main() -> None:
         for name, p in net.named_parameters().items():
             p.data.copy_(ema_backup[name])
 
+    record_loss = (loss_csv_path is not None) or (loss_plot_path is not None)
+    loss_rows: list[dict[str, Any]] = [] if record_loss else []
+    global_step = int(start_epoch) * len(trainloader) if record_loss else 0
+
     for epoch in range(start_epoch, int(args.epochs)):
         print("\nEpoch: %d" % epoch, flush=True)
 
@@ -251,7 +326,18 @@ def main() -> None:
             ema_update()
             optimizer.zero_grad()
 
-            train_loss += float(loss.data.item())
+            loss_value = float(loss.data.item())
+            train_loss += loss_value
+            if record_loss:
+                loss_rows.append(
+                    {
+                        "global_step": global_step,
+                        "epoch": int(epoch),
+                        "batch_idx": int(batch_idx),
+                        "loss": loss_value,
+                    }
+                )
+                global_step += 1
             _, predicted = logits.data.max(1)
             total += int(targets.size(0))
             correct += int(predicted.eq(targets).sum().item())
@@ -279,6 +365,15 @@ def main() -> None:
             }
             torch.save(state, ckpt_path)
             best_acc = acc
+
+    if record_loss:
+        if loss_csv_path is not None:
+            write_loss_csv(loss_rows, loss_csv_path)
+            print(f"Saved loss CSV to: {loss_csv_path}", flush=True)
+        if loss_plot_path is not None:
+            maybe_save_loss_plot(loss_rows, loss_plot_path)
+            if loss_plot_path.exists():
+                print(f"Saved loss curve to: {loss_plot_path}", flush=True)
 
     print("best acc: %.3f%%" % best_acc, flush=True)
 

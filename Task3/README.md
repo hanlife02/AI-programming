@@ -49,6 +49,9 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 - `--model`: `vgg16`（默认）、`dla` 或 `simple`
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: checkpoint 路径（默认 `Task3/checkpoint/ckpt.pth`）
+- `--save-loss-plot/--no-save-loss-plot`: 训练结束自动保存 loss curve（默认开启，保存到 `Task3/outputs/loss_curve.png`）
+- `--loss-plot`: 自定义 loss curve 图片输出路径
+- `--loss-csv`: 可选保存每 step 的 loss 到 CSV
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
 - `--wd-mode weights`: 仅对权重（ndim>=2）做 weight decay（更常见、更容易提升验证集 acc）；`--wd-mode all` 为旧行为（所有参数都 decay）
 - `--warmup-epochs`: 学习率线性 warmup（默认 5），通常能让训练更稳定
