@@ -20,6 +20,7 @@ env/
 # Training artifacts (any Task)
 data/
 checkpoints/
+checkpoint/
 outputs/
 figures/
 
@@ -31,3 +32,6 @@ figures/
 # Reports (local only)
 report.md
 report.pdf
+
+*.so
+build/
