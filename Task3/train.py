@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import random
 import time
@@ -29,6 +30,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=256, help="Per-GPU batch size.")
     p.add_argument("--lr", type=float, default=0.1)
+    p.add_argument("--scheduler", type=str, default="cosine", choices=["none", "step", "cosine"])
+    p.add_argument("--step-size", type=int, default=20)
+    p.add_argument("--gamma", type=float, default=0.1)
+    p.add_argument("--min-lr", type=float, default=0.0)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
     p.add_argument("--num-workers", type=int, default=8)
@@ -196,6 +201,27 @@ def _tensor_stats(x: torch.Tensor) -> str:
     )
 
 
+def _lr_for_epoch(
+    base_lr: float,
+    scheduler: str,
+    epoch: int,
+    epochs: int,
+    step_size: int,
+    gamma: float,
+    min_lr: float,
+) -> float:
+    if scheduler == "none":
+        return float(base_lr)
+    if scheduler == "step":
+        step_size = max(1, int(step_size))
+        k = max(0, (int(epoch) - 1) // step_size)
+        return float(base_lr) * (float(gamma) ** k)
+    if scheduler == "cosine":
+        t = (float(epoch) - 1.0) / max(1.0, float(epochs))
+        return float(min_lr) + 0.5 * (float(base_lr) - float(min_lr)) * (1.0 + math.cos(math.pi * t))
+    raise ValueError(f"unknown scheduler: {scheduler}")
+
+
 def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.Tensor, optim: SGD, sync_grads: Callable[[], None], info: DistInfo) -> None:
     try:
         from Task3.minifw import ops as fw_ops
@@ -360,10 +386,20 @@ def main() -> None:
     params = list(model.parameters())
     optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     sync_grads = build_grad_sync(params, info)
+    base_lr = float(args.lr)
 
     best_val = 0.0
     try:
         for epoch in range(1, args.epochs + 1):
+            optim.lr = _lr_for_epoch(
+                base_lr=base_lr,
+                scheduler=args.scheduler,
+                epoch=epoch,
+                epochs=args.epochs,
+                step_size=args.step_size,
+                gamma=args.gamma,
+                min_lr=args.min_lr,
+            )
             if sampler is not None and hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(epoch)
             model.train()
@@ -430,7 +466,7 @@ def main() -> None:
             global_img_s = (n_seen_g / dt) if dt > 0 else 0.0
             rank0_print(
                 info,
-                f"epoch {epoch:03d} train | loss {train_loss:.4f} acc {train_acc:.4f} | {global_img_s:.0f} img/s (global)",
+                f"epoch {epoch:03d} train | lr {optim.lr:.4g} loss {train_loss:.4f} acc {train_acc:.4f} | {global_img_s:.0f} img/s (global)",
             )
 
             if (not args.no_eval) and val_loader is not None:

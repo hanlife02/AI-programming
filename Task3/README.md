@@ -55,6 +55,8 @@ torchrun --standalone --nproc_per_node=2 Task3/train.py --epochs 50 --batch-size
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: 最优验证集 checkpoint 路径（默认 `Task3/checkpoints/task3_ckpt.pt`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
+- `--scheduler`: 学习率策略（`cosine`/`step`/`none`，默认 `cosine`）
+- `--step-size`, `--gamma`, `--min-lr`: `step`/`cosine` 的学习率相关参数
 - `--debug-step`: 只跑 1 个 step 并打印激活/梯度/更新幅度（用于排查训练停在 10% 左右的问题）
 
 ## 3) 说明
