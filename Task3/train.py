@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import random
 import time
@@ -30,10 +29,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=256, help="Per-GPU batch size.")
     p.add_argument("--lr", type=float, default=0.1)
-    p.add_argument("--scheduler", type=str, default="cosine", choices=["none", "step", "cosine"])
-    p.add_argument("--step-size", type=int, default=20)
-    p.add_argument("--gamma", type=float, default=0.1)
-    p.add_argument("--min-lr", type=float, default=0.0)
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
     p.add_argument("--num-workers", type=int, default=8)
@@ -208,27 +203,6 @@ def _tensor_stats(x: torch.Tensor) -> str:
     )
 
 
-def _lr_for_epoch(
-    base_lr: float,
-    scheduler: str,
-    epoch: int,
-    epochs: int,
-    step_size: int,
-    gamma: float,
-    min_lr: float,
-) -> float:
-    if scheduler == "none":
-        return float(base_lr)
-    if scheduler == "step":
-        step_size = max(1, int(step_size))
-        k = max(0, (int(epoch) - 1) // step_size)
-        return float(base_lr) * (float(gamma) ** k)
-    if scheduler == "cosine":
-        t = (float(epoch) - 1.0) / max(1.0, float(epochs))
-        return float(min_lr) + 0.5 * (float(base_lr) - float(min_lr)) * (1.0 + math.cos(math.pi * t))
-    raise ValueError(f"unknown scheduler: {scheduler}")
-
-
 def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.Tensor, optim: SGD, sync_grads: Callable[[], None], info: DistInfo) -> None:
     try:
         from Task3.minifw import ops as fw_ops
@@ -251,19 +225,25 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
     t8 = model.conv3(t7)
     t9 = model.bn3(t8)
     t10 = t9.relu()
-    t11 = model.pool2(t10)
-    t12 = model.gap(t11)
-    t13 = model.fc1(t12)
-    t14 = t13.relu()
-    t15 = model.fc2(t14)
-    t16 = t15.relu()
-    logits = model.fc3(t16)
+    t11 = model.conv4(t10)
+    t12 = model.bn4(t11)
+    t13 = t12.relu()
+    t14 = model.pool2(t13)
+    t15 = model.conv5(t14)
+    t16 = model.bn5(t15)
+    t17 = t16.relu()
+    t18 = model.conv6(t17)
+    t19 = model.bn6(t18)
+    t20 = t19.relu()
+    t21 = model.pool3(t20)
+    t22 = model.gap(t21)
+    logits = model.fc(t22)
     loss = logits.cross_entropy(labels)
 
     if info.rank == 0:
         print(f"[debug] conv1 out: {_tensor_stats(t1.data)}", flush=True)
-        print(f"[debug] pool2 out: {_tensor_stats(t11.data)}", flush=True)
-        print(f"[debug] gap out : {_tensor_stats(t12.data)}", flush=True)
+        print(f"[debug] pool3 out: {_tensor_stats(t21.data)}", flush=True)
+        print(f"[debug] gap out : {_tensor_stats(t22.data)}", flush=True)
         print(f"[debug] logits  : {_tensor_stats(logits.data)}", flush=True)
         print(f"[debug] loss    : {loss.data.item():.6f}", flush=True)
 
@@ -274,17 +254,13 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
         named = model.named_parameters()
         for k in [
             "conv1.w",
-            "conv1.b",
             "conv2.w",
-            "conv2.b",
             "conv3.w",
-            "conv3.b",
-            "fc1.w",
-            "fc1.b",
-            "fc2.w",
-            "fc2.b",
-            "fc3.w",
-            "fc3.b",
+            "conv4.w",
+            "conv5.w",
+            "conv6.w",
+            "fc.w",
+            "fc.b",
         ]:
             p = named.get(k)
             if p is None:
@@ -305,7 +281,7 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
     before = {}
     if info.rank == 0:
         for name, p in model.named_parameters().items():
-            if name in {"conv1.w", "fc1.w", "fc3.w", "fc3.b"}:
+            if name in {"conv1.w", "conv6.w", "fc.w", "fc.b"}:
                 before[name] = p.data.detach().clone()
 
     optim.step()
@@ -414,20 +390,10 @@ def main() -> None:
     params = list(model.parameters())
     optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     sync_grads = build_grad_sync(params, info)
-    base_lr = float(args.lr)
 
     best_val = 0.0
     try:
         for epoch in range(1, args.epochs + 1):
-            optim.lr = _lr_for_epoch(
-                base_lr=base_lr,
-                scheduler=args.scheduler,
-                epoch=epoch,
-                epochs=args.epochs,
-                step_size=args.step_size,
-                gamma=args.gamma,
-                min_lr=args.min_lr,
-            )
             if sampler is not None and hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(epoch)
             model.train()
@@ -494,7 +460,7 @@ def main() -> None:
             global_img_s = (n_seen_g / dt) if dt > 0 else 0.0
             rank0_print(
                 info,
-                f"epoch {epoch:03d} train | lr {optim.lr:.4g} loss {train_loss:.4f} acc {train_acc:.4f} | {global_img_s:.0f} img/s (global)",
+                f"epoch {epoch:03d} train | loss {train_loss:.4f} acc {train_acc:.4f} | {global_img_s:.0f} img/s (global)",
             )
 
             if (not args.no_eval) and val_loader is not None:

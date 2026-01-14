@@ -6,6 +6,7 @@
 - BatchNorm2d（含训练/推理 forward、backward、running stats 更新）也由 `CUDA + pybind11` 扩展提供
 - Python 侧实现自动微分（反向图）与 SGD 优化器
 - 数据处理允许使用 `torchvision`（符合 `hw.md` 的 Tips）
+- 模型结构对齐 Task1/Task2 的 `cnn_bn`：VGG 风格 `conv-bn-relu` 堆叠 + MaxPool + GAP + Linear
 
 ## 1) 构建扩展
 
@@ -46,8 +47,8 @@ torchrun --standalone --nproc_per_node=2 Task3/train.py
 
 说明：
 
-- 默认会从训练集切 `10%` 做验证（`--val-split 0.1`），并默认启用余弦退火学习率（`--scheduler cosine`）。
-- 如需关闭验证或学习率策略可显式传 `--no-eval` / `--scheduler none`。
+- 默认会从训练集切 `10%` 做验证（`--val-split 0.1`）。
+- 如需关闭验证可显式传 `--no-eval`。
 
 指定卡数量/指定哪些卡：
 
@@ -61,8 +62,6 @@ torchrun --standalone --nproc_per_node=2 Task3/train.py
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: 最优验证集 checkpoint 路径（默认 `Task3/checkpoints/task3_ckpt.pt`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
-- `--scheduler`: 学习率策略（`cosine`/`step`/`none`，默认 `cosine`）
-- `--step-size`, `--gamma`, `--min-lr`: `step`/`cosine` 的学习率相关参数
 - `--debug-step`: 只跑 1 个 step 并打印激活/梯度/更新幅度（用于排查训练停在 10% 左右的问题）
 
 ## 3) 说明

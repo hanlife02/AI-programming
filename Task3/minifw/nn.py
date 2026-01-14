@@ -190,28 +190,42 @@ class BatchNorm2d(Module):
 class SimpleCifarNet(Module):
     def __init__(self, device: torch.device | None = None) -> None:
         device = device or torch.device("cuda")
-        self.conv1 = Conv2d(3, 32, kernel=3, padding=1, device=device)
-        self.bn1 = BatchNorm2d(32, device=device)
-        self.conv2 = Conv2d(32, 64, kernel=3, padding=1, device=device)
+        # Match Task1/Task2 `cnn_bn` backbone:
+        # (64,64)->pool -> (128,128)->pool -> (256,256)->pool -> GAP -> Linear(256->10)
+        self.conv1 = Conv2d(3, 64, kernel=3, padding=1, bias=False, device=device)
+        self.bn1 = BatchNorm2d(64, device=device)
+        self.conv2 = Conv2d(64, 64, kernel=3, padding=1, bias=False, device=device)
         self.bn2 = BatchNorm2d(64, device=device)
         self.pool1 = MaxPool2d(2, 2)
-        self.conv3 = Conv2d(64, 128, kernel=3, padding=1, device=device)
+
+        self.conv3 = Conv2d(64, 128, kernel=3, padding=1, bias=False, device=device)
         self.bn3 = BatchNorm2d(128, device=device)
+        self.conv4 = Conv2d(128, 128, kernel=3, padding=1, bias=False, device=device)
+        self.bn4 = BatchNorm2d(128, device=device)
         self.pool2 = MaxPool2d(2, 2)
+
+        self.conv5 = Conv2d(128, 256, kernel=3, padding=1, bias=False, device=device)
+        self.bn5 = BatchNorm2d(256, device=device)
+        self.conv6 = Conv2d(256, 256, kernel=3, padding=1, bias=False, device=device)
+        self.bn6 = BatchNorm2d(256, device=device)
+        self.pool3 = MaxPool2d(2, 2)
         self.relu = ReLU()
         self.gap = GlobalAvgPool2d()
-        self.fc1 = Linear(128, 64, device=device)
-        self.fc2 = Linear(64, 32, device=device)
-        self.fc3 = Linear(32, 10, device=device)
+        self.fc = Linear(256, 10, device=device)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
         x = self.pool1(x)
+
         x = self.relu(self.bn3(self.conv3(x)))
+        x = self.relu(self.bn4(self.conv4(x)))
         x = self.pool2(x)
+
+        x = self.relu(self.bn5(self.conv5(x)))
+        x = self.relu(self.bn6(self.conv6(x)))
+        x = self.pool3(x)
+
         x = self.gap(x)
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = self.fc(x)
         return x
