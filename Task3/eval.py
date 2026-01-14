@@ -7,28 +7,31 @@ from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torchvision
-import torchvision.transforms as transforms
 
 try:
-    from Task3.minifw.nn import SimpleCifarNet
+    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet
     from Task3.minifw.tensor import Tensor
 except ModuleNotFoundError:  # supports: cd Task3 && python eval.py
-    from minifw.nn import SimpleCifarNet
+    from minifw.nn import DLALikeCifarNet, SimpleCifarNet
     from minifw.tensor import Tensor
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Task3: Evaluate checkpoint on CIFAR-10 test set (single GPU or DDP).")
     p.add_argument("--data-dir", type=str, default="")
-    p.add_argument("--ckpt", type=str, default="Task3/checkpoints/task3_ckpt.pt")
+    p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--backend", type=str, default="", help="DDP backend override (default: nccl).")
     return p.parse_args()
 
 
-def build_test_transform() -> transforms.Compose:
+def build_test_transform():
+    try:
+        import torchvision.transforms as transforms
+    except ModuleNotFoundError as e:  # pragma: no cover
+        raise ModuleNotFoundError("Task3 evaluation requires torchvision. Install it with: pip install torchvision") from e
+
     mean = (0.4914, 0.4822, 0.4465)
     std = (0.2023, 0.1994, 0.2010)
     return transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])
@@ -89,6 +92,10 @@ def rank0_print(info: DistInfo, msg: str) -> None:
 
 def main() -> None:
     args = parse_args()
+    try:
+        import torchvision
+    except ModuleNotFoundError as e:  # pragma: no cover
+        raise ModuleNotFoundError("Task3 evaluation requires torchvision. Install it with: pip install torchvision") from e
     info = get_dist_info()
     setup_dist(args, info)
 
@@ -99,11 +106,12 @@ def main() -> None:
 
     task_dir = Path(__file__).resolve().parent
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else (task_dir / "data")
-    ckpt_path = Path(args.ckpt).expanduser()
+    ckpt_path = Path(args.ckpt).expanduser() if args.ckpt else (task_dir / "checkpoint" / "ckpt.pth")
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    model = SimpleCifarNet(device=device)
-    state = ckpt.get("model", {})
+    arch = str(ckpt.get("arch", "simple"))
+    model = DLALikeCifarNet(device=device) if arch == "dla" else SimpleCifarNet(device=device)
+    state = ckpt.get("net", {})
     for name, p in model.named_parameters().items():
         if name not in state:
             raise KeyError(f"Missing parameter in checkpoint: {name}")
@@ -156,4 +164,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

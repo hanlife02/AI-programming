@@ -1,10 +1,12 @@
 # Task 3: Custom Implementation (CIFAR-10)
 
-本目录实现了一个最小但可训练的“自研”CNN框架：
+本目录实现了一个最小但可训练的“自研”CNN 框架，满足作业要求：
 
-- 卷积/反传、ReLU、MaxPool、GlobalAvgPool、Linear、CrossEntropy 都由 `CUDA + pybind11` 扩展提供
-- Python 侧实现自动微分（反向图）与 SGD 优化器
-- 数据处理允许使用 `torchvision`（符合 `hw.md` 的 Tips）
+- **卷积网络（forward/backward）全部由自定义 CUDA 算子实现**：`Task3/csrc/ops.cu`
+- 用 **pybind11** 导出为 Python 可调用扩展模块 `task3_ops`：`Task3/csrc/bindings.cpp`
+  - 其中卷积提供了 `task3_ops.Conv2dOp`（class），并在 Python 侧缓存复用：`Task3/minifw/ops.py`
+- Python 侧只负责：自动微分（计算图反传）、优化器（SGD）、训练循环与数据加载：`Task3/minifw/tensor.py` / `Task3/minifw/optim.py` / `Task3/train.py`
+- 数据处理不做限制：这里使用 `torchvision.datasets.CIFAR10 + DataLoader`
 
 ## 1) 构建扩展
 
@@ -15,7 +17,7 @@ cd Task3
 python setup.py build_ext --inplace
 ```
 
-成功后会生成 `task3_ops.*.so`。
+成功后会生成 `task3_ops.*.so`（Linux/macOS）或 `task3_ops.*.pyd`（Windows）。
 
 如果你遇到类似 `nvcc fatal: Unsupported gpu architecture 'compute_120'` 的报错，通常是 **PyTorch 编译时的 CUDA 版本** 与 **本机 nvcc 版本** 不一致导致自动选择了 nvcc 不支持的架构。本项目的 `Task3/setup.py` 会自动过滤不支持的架构；你也可以手动指定：
 
@@ -37,32 +39,18 @@ TASK3_CUDA_ARCH_LIST="9.0+PTX" python setup.py build_ext --inplace
 python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 ```
 
-多卡（DDP / torchrun），`--batch-size` 为 **单卡** batch：
-
-```bash
-torchrun --standalone --nproc_per_node=2 Task3/train.py
-```
-
 说明：
 
-- 默认会从训练集切 `10%` 做验证（`--val-split 0.1`），并默认启用余弦退火学习率（`--scheduler cosine`）。
-- 如需关闭验证或学习率策略可显式传 `--no-eval` / `--scheduler none`。
-
-指定卡数量/指定哪些卡：
-
-- **卡数量**：用 `--nproc_per_node=<N>` 指定启动的进程数（通常等于使用的 GPU 数）。
-  - 例如用 2 卡：`torchrun --standalone --nproc_per_node=2 Task3/train.py ...`
-- **指定具体 GPU**：用 `CUDA_VISIBLE_DEVICES` 限制可见 GPU，再把 `--nproc_per_node` 设为可见卡数。
-  - 例如只用 0,1 号卡（2 卡）：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task3/train.py ...`
+- 训练过程使用自研 `Tensor` 的计算图反传（不依赖 `torch.autograd`），并调用 CUDA 扩展完成各层的 forward/backward 与 `sgd_update_` 参数更新。
+- 学习率可选余弦退火：`--scheduler cosine --t-max <int>`；或关闭：`--scheduler none`。
 
 常用参数：
 
+- `--model`: `dla`（默认，更深的纯卷积网络）或 `simple`（更小的 baseline）
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
-- `--ckpt`: 最优验证集 checkpoint 路径（默认 `Task3/checkpoints/task3_ckpt.pt`）
+- `--ckpt`: checkpoint 路径（默认 `Task3/checkpoint/ckpt.pth`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
-- `--scheduler`: 学习率策略（`cosine`/`step`/`none`，默认 `cosine`）
-- `--step-size`, `--gamma`, `--min-lr`: `step`/`cosine` 的学习率相关参数
-- `--debug-step`: 只跑 1 个 step 并打印激活/梯度/更新幅度（用于排查训练停在 10% 左右的问题）
+- `-r/--resume`: 从 `--ckpt` 恢复训练（会校验模型结构 `arch` 是否一致）
 
 ## 3) 说明
 
@@ -72,11 +60,5 @@ torchrun --standalone --nproc_per_node=2 Task3/train.py
 ## 4) 测试集评估
 
 ```bash
-python Task3/eval.py --ckpt Task3/checkpoints/task3_ckpt.pt
-```
-
-多卡评估：
-
-```bash
-torchrun --standalone --nproc_per_node=4 Task3/eval.py --ckpt Task3/checkpoints/task3_ckpt.pt
+python Task3/eval.py --ckpt Task3/checkpoint/ckpt.pth
 ```

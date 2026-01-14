@@ -100,6 +100,72 @@ class GlobalAvgPool2d(Module):
     def forward(self, x: Tensor) -> Tensor:
         return x.global_avg_pool2d()
 
+@dataclass
+class ConvReLU(Module):
+    conv: Conv2d
+    relu: ReLU
+
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        kernel: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        bias: bool = True,
+        device: torch.device | None = None,
+    ):
+        self.conv = Conv2d(in_ch, out_ch, kernel=kernel, stride=stride, padding=padding, bias=bias, device=device)
+        self.relu = ReLU()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.relu(self.conv(x))
+
+
+class DLALikeCifarNet(Module):
+    """A deeper CIFAR-10 CNN that only uses the custom CUDA ops (Conv/ReLU/GAP/Linear)."""
+
+    def __init__(self, device: torch.device | None = None) -> None:
+        device = device or torch.device("cuda")
+        self.stem = ConvReLU(3, 16, kernel=3, stride=1, padding=1, device=device)
+
+        self.level0 = [ConvReLU(16, 16, kernel=3, stride=1, padding=1, device=device)]
+        self.level1 = [
+            ConvReLU(16, 32, kernel=3, stride=2, padding=1, device=device),
+            ConvReLU(32, 32, kernel=3, stride=1, padding=1, device=device),
+        ]
+        self.level2 = [
+            ConvReLU(32, 64, kernel=3, stride=2, padding=1, device=device),
+            ConvReLU(64, 64, kernel=3, stride=1, padding=1, device=device),
+        ]
+        self.level3 = [
+            ConvReLU(64, 128, kernel=3, stride=2, padding=1, device=device),
+            ConvReLU(128, 128, kernel=3, stride=1, padding=1, device=device),
+        ]
+        self.level4 = [
+            ConvReLU(128, 256, kernel=3, stride=2, padding=1, device=device),
+            ConvReLU(256, 256, kernel=3, stride=1, padding=1, device=device),
+        ]
+
+        self.gap = GlobalAvgPool2d()
+        self.fc = Linear(256, 10, device=device)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.stem(x)
+        for layer in self.level0:
+            x = layer(x)
+        for layer in self.level1:
+            x = layer(x)
+        for layer in self.level2:
+            x = layer(x)
+        for layer in self.level3:
+            x = layer(x)
+        for layer in self.level4:
+            x = layer(x)
+        x = self.gap(x)
+        x = self.fc(x)
+        return x
+
 
 class SimpleCifarNet(Module):
     def __init__(self, device: torch.device | None = None) -> None:
@@ -122,4 +188,3 @@ class SimpleCifarNet(Module):
         x = self.gap(x)
         x = self.fc(x)
         return x
-

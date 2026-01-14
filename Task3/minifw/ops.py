@@ -26,6 +26,7 @@ def _load_ext():
 
 
 _ext = None
+_conv2d_op_cache = {}
 
 
 def ext():
@@ -33,6 +34,15 @@ def ext():
     if _ext is None:
         _ext = _load_ext()
     return _ext
+
+
+def _conv2d_op(stride: int, padding: int, has_bias: bool):
+    key = (int(stride), int(padding), bool(has_bias))
+    op = _conv2d_op_cache.get(key)
+    if op is None:
+        op = ext().Conv2dOp(key[0], key[1], key[2])
+        _conv2d_op_cache[key] = op
+    return op
 
 
 @dataclass(frozen=True)
@@ -53,7 +63,7 @@ class CrossEntropyContext:
 def conv2d_forward(x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor], stride: int, padding: int) -> torch.Tensor:
     if w.size(2) > 7 or w.size(3) > 7:
         raise ValueError("Task3 conv2d supports kernel sizes up to 7x7")
-    return ext().conv2d_forward(x, w, b, int(stride), int(padding))
+    return _conv2d_op(stride, padding, has_bias=b is not None).forward(x, w, b)
 
 
 def conv2d_backward(
@@ -66,15 +76,13 @@ def conv2d_backward(
     stride: int,
     padding: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return ext().conv2d_backward(
+    return _conv2d_op(stride, padding, has_bias=True).backward(
         grad_out,
         x,
         w,
         bool(need_grad_x),
         bool(need_grad_w),
         bool(need_grad_b),
-        int(stride),
-        int(padding),
     )
 
 
