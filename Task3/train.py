@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=2)
-    p.add_argument("--log-every", type=int, default=50, help="update progress bar every N steps (reduces CPU overhead)")
+    p.add_argument("--log-every", type=int, default=1, help="update progress bar every N steps (reduces CPU overhead)")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
     p.add_argument(
