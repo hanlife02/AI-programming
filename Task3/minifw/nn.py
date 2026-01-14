@@ -200,7 +200,9 @@ class SimpleCifarNet(Module):
         self.pool2 = MaxPool2d(2, 2)
         self.relu = ReLU()
         self.gap = GlobalAvgPool2d()
-        self.fc = Linear(128, 10, device=device)
+        self.fc1 = Linear(128, 64, device=device)
+        self.fc2 = Linear(64, 32, device=device)
+        self.fc3 = Linear(32, 10, device=device)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.relu(self.bn1(self.conv1(x)))
@@ -209,5 +211,7 @@ class SimpleCifarNet(Module):
         x = self.relu(self.bn3(self.conv3(x)))
         x = self.pool2(x)
         x = self.gap(x)
-        x = self.fc(x)
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.fc3(x)
         return x

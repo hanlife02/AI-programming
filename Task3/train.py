@@ -253,7 +253,11 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
     t10 = t9.relu()
     t11 = model.pool2(t10)
     t12 = model.gap(t11)
-    logits = model.fc(t12)
+    t13 = model.fc1(t12)
+    t14 = t13.relu()
+    t15 = model.fc2(t14)
+    t16 = t15.relu()
+    logits = model.fc3(t16)
     loss = logits.cross_entropy(labels)
 
     if info.rank == 0:
@@ -268,7 +272,20 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
 
     if info.rank == 0:
         named = model.named_parameters()
-        for k in ["conv1.w", "conv1.b", "conv2.w", "conv2.b", "conv3.w", "conv3.b", "fc.w", "fc.b"]:
+        for k in [
+            "conv1.w",
+            "conv1.b",
+            "conv2.w",
+            "conv2.b",
+            "conv3.w",
+            "conv3.b",
+            "fc1.w",
+            "fc1.b",
+            "fc2.w",
+            "fc2.b",
+            "fc3.w",
+            "fc3.b",
+        ]:
             p = named.get(k)
             if p is None:
                 continue
@@ -288,7 +305,7 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
     before = {}
     if info.rank == 0:
         for name, p in model.named_parameters().items():
-            if name in {"conv1.w", "fc.w", "fc.b"}:
+            if name in {"conv1.w", "fc1.w", "fc3.w", "fc3.b"}:
                 before[name] = p.data.detach().clone()
 
     optim.step()
