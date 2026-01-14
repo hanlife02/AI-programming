@@ -83,6 +83,46 @@ __global__ void conv2d_fwd_kernel(const float* __restrict__ x, const float* __re
     y[(((n * Cout + oc) * Hout) + oh) * Wout + ow] = acc;
 }
 
+template <int OC_TILE>
+__global__ void conv2d_fwd_kernel_oc_tile(const float* __restrict__ x, const float* __restrict__ w,
+                                         const float* __restrict__ b, float* __restrict__ y, int N, int Cin, int Hin,
+                                         int Win, int Cout, int Kh, int Kw, int Hout, int Wout, int stride,
+                                         int padding, bool has_bias, int oc_tiles) {
+    int ow = blockIdx.x * blockDim.x + threadIdx.x;
+    int oh = blockIdx.y * blockDim.y + threadIdx.y;
+    int nt = blockIdx.z;
+    int n = nt / oc_tiles;
+    int oc0 = (nt - n * oc_tiles) * OC_TILE;
+    if (n >= N || oh >= Hout || ow >= Wout) return;
+
+    int ih0 = oh * stride - padding;
+    int iw0 = ow * stride - padding;
+    const int x_n_offset = ((n * Cin) * Hin) * Win;
+
+    for (int oc = oc0; oc < oc0 + OC_TILE && oc < Cout; ++oc) {
+        float acc = (has_bias && b) ? b[oc] : 0.0f;
+        const int w_oc_offset = ((oc * Cin) * Kh) * Kw;
+        for (int ic = 0; ic < Cin; ++ic) {
+            const float* w_ptr = w + w_oc_offset + (ic * Kh * Kw);
+            const float* x_ptr = x + x_n_offset + (ic * Hin * Win);
+            #pragma unroll
+            for (int kh = 0; kh < 7; ++kh) {  // hard cap for small kernels; guarded by kh < Kh below
+                if (kh >= Kh) break;
+                int ih = ih0 + kh;
+                if ((unsigned)ih >= (unsigned)Hin) continue;
+                #pragma unroll
+                for (int kw = 0; kw < 7; ++kw) {
+                    if (kw >= Kw) break;
+                    int iw = iw0 + kw;
+                    if ((unsigned)iw >= (unsigned)Win) continue;
+                    acc += x_ptr[ih * Win + iw] * w_ptr[kh * Kw + kw];
+                }
+            }
+        }
+        y[(((n * Cout + oc) * Hout) + oh) * Wout + ow] = acc;
+    }
+}
+
 template <int TILE_H, int TILE_W, int TILE_C>
 __global__ void conv2d_fwd_3x3s1p1_tiled_kernel(const float* __restrict__ x, const float* __restrict__ w,
                                                 const float* __restrict__ b, float* __restrict__ y, int N, int Cin,
@@ -209,6 +249,41 @@ __global__ void conv2d_bwd_input_kernel(const float* __restrict__ grad_out, cons
         }
     }
     grad_x[(((n * Cin + ic) * Hin) + ih) * Win + iw] = acc;
+}
+
+template <int IC_TILE>
+__global__ void conv2d_bwd_input_kernel_ic_tile(const float* __restrict__ grad_out, const float* __restrict__ w,
+                                               float* __restrict__ grad_x, int N, int Cin, int Hin, int Win, int Cout,
+                                               int Kh, int Kw, int Hout, int Wout, int stride, int padding,
+                                               int ic_tiles) {
+    int iw = blockIdx.x * blockDim.x + threadIdx.x;
+    int ih = blockIdx.y * blockDim.y + threadIdx.y;
+    int nt = blockIdx.z;
+    int n = nt / ic_tiles;
+    int ic0 = (nt - n * ic_tiles) * IC_TILE;
+    if (n >= N || ih >= Hin || iw >= Win) return;
+
+    for (int ic = ic0; ic < ic0 + IC_TILE && ic < Cin; ++ic) {
+        float acc = 0.0f;
+        for (int oc = 0; oc < Cout; ++oc) {
+            const float* w_ptr = w + (((oc * Cin + ic) * Kh) * Kw);
+            const float* go_ptr = grad_out + (((n * Cout + oc) * Hout) * Wout);
+            for (int kh = 0; kh < Kh; ++kh) {
+                int oh = ih + padding - kh;
+                if (oh % stride != 0) continue;
+                oh /= stride;
+                if ((unsigned)oh >= (unsigned)Hout) continue;
+                for (int kw = 0; kw < Kw; ++kw) {
+                    int ow = iw + padding - kw;
+                    if (ow % stride != 0) continue;
+                    ow /= stride;
+                    if ((unsigned)ow >= (unsigned)Wout) continue;
+                    acc += go_ptr[oh * Wout + ow] * w_ptr[kh * Kw + kw];
+                }
+            }
+        }
+        grad_x[(((n * Cin + ic) * Hin) + ih) * Win + iw] = acc;
+    }
 }
 
 template <int THREADS>
@@ -347,6 +422,41 @@ __global__ void maxpool2d_fwd_kernel(const float* __restrict__ x, float* __restr
     idx[(((n * C + c) * Hout) + oh) * Wout + ow] = best_i;
 }
 
+template <int C_TILE>
+__global__ void maxpool2d_fwd_kernel_c_tile(const float* __restrict__ x, float* __restrict__ y,
+                                           int32_t* __restrict__ idx, int N, int C, int Hin, int Win, int Hout,
+                                           int Wout, int kernel, int stride, int c_tiles) {
+    int ow = blockIdx.x * blockDim.x + threadIdx.x;
+    int oh = blockIdx.y * blockDim.y + threadIdx.y;
+    int nt = blockIdx.z;
+    int n = nt / c_tiles;
+    int c0 = (nt - n * c_tiles) * C_TILE;
+    if (n >= N || oh >= Hout || ow >= Wout) return;
+
+    int ih0 = oh * stride;
+    int iw0 = ow * stride;
+    for (int c = c0; c < c0 + C_TILE && c < C; ++c) {
+        float best = -INFINITY;
+        int best_i = 0;
+        const float* x_ptr = x + (((n * C + c) * Hin) * Win);
+        for (int kh = 0; kh < kernel; ++kh) {
+            int ih = ih0 + kh;
+            if (ih >= Hin) continue;
+            for (int kw = 0; kw < kernel; ++kw) {
+                int iw = iw0 + kw;
+                if (iw >= Win) continue;
+                float v = x_ptr[ih * Win + iw];
+                if (v > best) {
+                    best = v;
+                    best_i = ih * Win + iw;
+                }
+            }
+        }
+        y[(((n * C + c) * Hout) + oh) * Wout + ow] = best;
+        idx[(((n * C + c) * Hout) + oh) * Wout + ow] = best_i;
+    }
+}
+
 __global__ void maxpool2d_bwd_kernel(const float* __restrict__ grad_out, const int32_t* __restrict__ idx,
                                      float* __restrict__ grad_x, int N, int C, int Hin, int Win, int Hout,
                                      int Wout) {
@@ -361,6 +471,25 @@ __global__ void maxpool2d_bwd_kernel(const float* __restrict__ grad_out, const i
     int in_i = idx[out_offset];
     float go = grad_out[out_offset];
     grad_x[(((n * C + c) * Hin) * Win) + in_i] = go;
+}
+
+template <int C_TILE>
+__global__ void maxpool2d_bwd_kernel_c_tile(const float* __restrict__ grad_out, const int32_t* __restrict__ idx,
+                                           float* __restrict__ grad_x, int N, int C, int Hin, int Win, int Hout,
+                                           int Wout, int c_tiles) {
+    int ow = blockIdx.x * blockDim.x + threadIdx.x;
+    int oh = blockIdx.y * blockDim.y + threadIdx.y;
+    int nt = blockIdx.z;
+    int n = nt / c_tiles;
+    int c0 = (nt - n * c_tiles) * C_TILE;
+    if (n >= N || oh >= Hout || ow >= Wout) return;
+
+    for (int c = c0; c < c0 + C_TILE && c < C; ++c) {
+        int out_offset = (((n * C + c) * Hout) + oh) * Wout + ow;
+        int in_i = idx[out_offset];
+        float go = grad_out[out_offset];
+        grad_x[(((n * C + c) * Hin) * Win) + in_i] = go;
+    }
 }
 
 __global__ void global_avg_pool_fwd_kernel(const float* __restrict__ x, float* __restrict__ y, int N, int C,
@@ -589,23 +718,62 @@ torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
 
     const int Hout = (Hin + 2 * (int)padding - Kh) / (int)stride + 1;
     const int Wout = (Win + 2 * (int)padding - Kw) / (int)stride + 1;
+    TORCH_CHECK(Hout > 0 && Wout > 0, "Invalid output size for conv2d (check stride/padding/kernel)");
     auto y = torch::empty({N, Cout, Hout, Wout}, x.options());
 
     c10::cuda::CUDAGuard guard(x.device());
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
 
     dim3 block(16, 16, 1);
-    dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, N * Cout);
-    if (Kh == 3 && Kw == 3 && stride == 1 && padding == 1) {
-        conv2d_fwd_3x3s1p1_tiled_kernel<16, 16, 4>
-            <<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
-                                         b.has_value() ? b->data_ptr<float>() : nullptr, y.data_ptr<float>(), N, Cin,
-                                         Hin, Win, Cout, Hout, Wout, b.has_value());
+    const int64_t nc = (int64_t)N * (int64_t)Cout;
+    if (nc <= 65535) {
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)nc);
+        if (Kh == 3 && Kw == 3 && stride == 1 && padding == 1) {
+            conv2d_fwd_3x3s1p1_tiled_kernel<16, 16, 4>
+                <<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
+                                             b.has_value() ? b->data_ptr<float>() : nullptr, y.data_ptr<float>(), N,
+                                             Cin, Hin, Win, Cout, Hout, Wout, b.has_value());
+        } else {
+            conv2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
+                                                          b.has_value() ? b->data_ptr<float>() : nullptr,
+                                                          y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh, Kw, Hout,
+                                                          Wout, (int)stride, (int)padding, b.has_value());
+        }
     } else {
-        conv2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
-                                                      b.has_value() ? b->data_ptr<float>() : nullptr,
-                                                      y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh, Kw, Hout, Wout,
-                                                      (int)stride, (int)padding, b.has_value());
+        // Avoid grid.z overflow for large batch/channel products by tiling output channels.
+        // Note: this path uses the generic kernel (not the 3x3 tiled fast path) for simplicity.
+        int oc_tile = 1;
+        while ((int64_t)N * (int64_t)((Cout + oc_tile - 1) / oc_tile) > 65535 && oc_tile < 16) oc_tile *= 2;
+        const int oc_tiles = (Cout + oc_tile - 1) / oc_tile;
+        TORCH_CHECK((int64_t)N * (int64_t)oc_tiles <= 65535, "conv2d_forward: N*Cout too large for kernel launch");
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)(N * oc_tiles));
+        const float* bp = b.has_value() ? b->data_ptr<float>() : nullptr;
+        if (oc_tile == 16) {
+            conv2d_fwd_kernel_oc_tile<16><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(), bp,
+                                                                      y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                      Kw, Hout, Wout, (int)stride, (int)padding,
+                                                                      b.has_value(), oc_tiles);
+        } else if (oc_tile == 8) {
+            conv2d_fwd_kernel_oc_tile<8><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(), bp,
+                                                                     y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                     Kw, Hout, Wout, (int)stride, (int)padding,
+                                                                     b.has_value(), oc_tiles);
+        } else if (oc_tile == 4) {
+            conv2d_fwd_kernel_oc_tile<4><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(), bp,
+                                                                     y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                     Kw, Hout, Wout, (int)stride, (int)padding,
+                                                                     b.has_value(), oc_tiles);
+        } else if (oc_tile == 2) {
+            conv2d_fwd_kernel_oc_tile<2><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(), bp,
+                                                                     y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                     Kw, Hout, Wout, (int)stride, (int)padding,
+                                                                     b.has_value(), oc_tiles);
+        } else {
+            conv2d_fwd_kernel_oc_tile<1><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(), bp,
+                                                                     y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                     Kw, Hout, Wout, (int)stride, (int)padding,
+                                                                     b.has_value(), oc_tiles);
+        }
     }
     return y;
 }
@@ -641,10 +809,40 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> conv2d_backward(
 
     dim3 block(16, 16, 1);
     if (need_grad_x) {
-        dim3 grid_x((Win + block.x - 1) / block.x, (Hin + block.y - 1) / block.y, N * Cin);
-        conv2d_bwd_input_kernel<<<grid_x, block, 0, stream>>>(grad_out.data_ptr<float>(), w.data_ptr<float>(),
-                                                             grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh, Kw,
-                                                             Hout, Wout, (int)stride, (int)padding);
+        const int64_t ncx = (int64_t)N * (int64_t)Cin;
+        if (ncx <= 65535) {
+            dim3 grid_x((Win + block.x - 1) / block.x, (Hin + block.y - 1) / block.y, (unsigned)ncx);
+            conv2d_bwd_input_kernel<<<grid_x, block, 0, stream>>>(grad_out.data_ptr<float>(), w.data_ptr<float>(),
+                                                                 grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh,
+                                                                 Kw, Hout, Wout, (int)stride, (int)padding);
+        } else {
+            int ic_tile = 1;
+            while ((int64_t)N * (int64_t)((Cin + ic_tile - 1) / ic_tile) > 65535 && ic_tile < 16) ic_tile *= 2;
+            const int ic_tiles = (Cin + ic_tile - 1) / ic_tile;
+            TORCH_CHECK((int64_t)N * (int64_t)ic_tiles <= 65535, "conv2d_backward: N*Cin too large for kernel launch");
+            dim3 grid_x((Win + block.x - 1) / block.x, (Hin + block.y - 1) / block.y, (unsigned)(N * ic_tiles));
+            if (ic_tile == 16) {
+                conv2d_bwd_input_kernel_ic_tile<16><<<grid_x, block, 0, stream>>>(
+                    grad_out.data_ptr<float>(), w.data_ptr<float>(), grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout,
+                    Kh, Kw, Hout, Wout, (int)stride, (int)padding, ic_tiles);
+            } else if (ic_tile == 8) {
+                conv2d_bwd_input_kernel_ic_tile<8><<<grid_x, block, 0, stream>>>(
+                    grad_out.data_ptr<float>(), w.data_ptr<float>(), grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout,
+                    Kh, Kw, Hout, Wout, (int)stride, (int)padding, ic_tiles);
+            } else if (ic_tile == 4) {
+                conv2d_bwd_input_kernel_ic_tile<4><<<grid_x, block, 0, stream>>>(
+                    grad_out.data_ptr<float>(), w.data_ptr<float>(), grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout,
+                    Kh, Kw, Hout, Wout, (int)stride, (int)padding, ic_tiles);
+            } else if (ic_tile == 2) {
+                conv2d_bwd_input_kernel_ic_tile<2><<<grid_x, block, 0, stream>>>(
+                    grad_out.data_ptr<float>(), w.data_ptr<float>(), grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout,
+                    Kh, Kw, Hout, Wout, (int)stride, (int)padding, ic_tiles);
+            } else {
+                conv2d_bwd_input_kernel_ic_tile<1><<<grid_x, block, 0, stream>>>(
+                    grad_out.data_ptr<float>(), w.data_ptr<float>(), grad_x.data_ptr<float>(), N, Cin, Hin, Win, Cout,
+                    Kh, Kw, Hout, Wout, (int)stride, (int)padding, ic_tiles);
+            }
+        }
     }
 
     constexpr int THREADS = 256;
@@ -727,16 +925,47 @@ std::tuple<torch::Tensor, torch::Tensor> maxpool2d_forward(torch::Tensor x, int6
     const int Win = (int)x.size(3);
     const int Hout = (Hin - (int)kernel) / (int)stride + 1;
     const int Wout = (Win - (int)kernel) / (int)stride + 1;
+    TORCH_CHECK(Hout > 0 && Wout > 0, "Invalid output size for maxpool2d (check kernel/stride)");
     auto y = torch::empty({N, C, Hout, Wout}, x.options());
     auto idx = torch::empty({N, C, Hout, Wout}, x.options().dtype(torch::kInt32));
 
     c10::cuda::CUDAGuard guard(x.device());
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
     dim3 block(16, 16, 1);
-    dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, N * C);
-    maxpool2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
-                                                     idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout, Wout,
-                                                     (int)kernel, (int)stride);
+    const int64_t nc = (int64_t)N * (int64_t)C;
+    if (nc <= 65535) {
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)nc);
+        maxpool2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                         idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout, Wout,
+                                                         (int)kernel, (int)stride);
+    } else {
+        int c_tile = 1;
+        while ((int64_t)N * (int64_t)((C + c_tile - 1) / c_tile) > 65535 && c_tile < 16) c_tile *= 2;
+        const int c_tiles = (C + c_tile - 1) / c_tile;
+        TORCH_CHECK((int64_t)N * (int64_t)c_tiles <= 65535, "maxpool2d_forward: N*C too large for kernel launch");
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)(N * c_tiles));
+        if (c_tile == 16) {
+            maxpool2d_fwd_kernel_c_tile<16><<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                                        idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout,
+                                                                        Wout, (int)kernel, (int)stride, c_tiles);
+        } else if (c_tile == 8) {
+            maxpool2d_fwd_kernel_c_tile<8><<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                                       idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout,
+                                                                       Wout, (int)kernel, (int)stride, c_tiles);
+        } else if (c_tile == 4) {
+            maxpool2d_fwd_kernel_c_tile<4><<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                                       idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout,
+                                                                       Wout, (int)kernel, (int)stride, c_tiles);
+        } else if (c_tile == 2) {
+            maxpool2d_fwd_kernel_c_tile<2><<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                                       idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout,
+                                                                       Wout, (int)kernel, (int)stride, c_tiles);
+        } else {
+            maxpool2d_fwd_kernel_c_tile<1><<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(),
+                                                                       idx.data_ptr<int32_t>(), N, C, Hin, Win, Hout,
+                                                                       Wout, (int)kernel, (int)stride, c_tiles);
+        }
+    }
     return {y, idx};
 }
 
@@ -754,10 +983,40 @@ torch::Tensor maxpool2d_backward(torch::Tensor grad_out, torch::Tensor indices, 
     c10::cuda::CUDAGuard guard(grad_out.device());
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
     dim3 block(16, 16, 1);
-    dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, N * C);
-    maxpool2d_bwd_kernel<<<grid, block, 0, stream>>>(grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(),
-                                                     grad_x.data_ptr<float>(), N, C, (int)in_h, (int)in_w, Hout,
-                                                     Wout);
+    const int64_t nc = (int64_t)N * (int64_t)C;
+    if (nc <= 65535) {
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)nc);
+        maxpool2d_bwd_kernel<<<grid, block, 0, stream>>>(grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(),
+                                                         grad_x.data_ptr<float>(), N, C, (int)in_h, (int)in_w, Hout,
+                                                         Wout);
+    } else {
+        int c_tile = 1;
+        while ((int64_t)N * (int64_t)((C + c_tile - 1) / c_tile) > 65535 && c_tile < 16) c_tile *= 2;
+        const int c_tiles = (C + c_tile - 1) / c_tile;
+        TORCH_CHECK((int64_t)N * (int64_t)c_tiles <= 65535, "maxpool2d_backward: N*C too large for kernel launch");
+        dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, (unsigned)(N * c_tiles));
+        if (c_tile == 16) {
+            maxpool2d_bwd_kernel_c_tile<16><<<grid, block, 0, stream>>>(
+                grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(), grad_x.data_ptr<float>(), N, C, (int)in_h,
+                (int)in_w, Hout, Wout, c_tiles);
+        } else if (c_tile == 8) {
+            maxpool2d_bwd_kernel_c_tile<8><<<grid, block, 0, stream>>>(
+                grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(), grad_x.data_ptr<float>(), N, C, (int)in_h,
+                (int)in_w, Hout, Wout, c_tiles);
+        } else if (c_tile == 4) {
+            maxpool2d_bwd_kernel_c_tile<4><<<grid, block, 0, stream>>>(
+                grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(), grad_x.data_ptr<float>(), N, C, (int)in_h,
+                (int)in_w, Hout, Wout, c_tiles);
+        } else if (c_tile == 2) {
+            maxpool2d_bwd_kernel_c_tile<2><<<grid, block, 0, stream>>>(
+                grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(), grad_x.data_ptr<float>(), N, C, (int)in_h,
+                (int)in_w, Hout, Wout, c_tiles);
+        } else {
+            maxpool2d_bwd_kernel_c_tile<1><<<grid, block, 0, stream>>>(
+                grad_out.data_ptr<float>(), indices.data_ptr<int32_t>(), grad_x.data_ptr<float>(), N, C, (int)in_h,
+                (int)in_w, Hout, Wout, c_tiles);
+        }
+    }
     return grad_x;
 }
 
