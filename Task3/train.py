@@ -15,12 +15,12 @@ from pathlib import Path
 import torch
 
 try:
-    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet
+    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
     from Task3.minifw.optim import SGD
     from Task3.minifw.tensor import Tensor
     from Task3.utils import progress_bar
 except ModuleNotFoundError:  # supports: cd Task3 && python train.py
-    from minifw.nn import DLALikeCifarNet, SimpleCifarNet
+    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
     from minifw.optim import SGD
     from minifw.tensor import Tensor
     from utils import progress_bar
@@ -28,7 +28,7 @@ except ModuleNotFoundError:  # supports: cd Task3 && python train.py
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Task3 CIFAR-10 Training (custom CUDA framework)")
-    p.add_argument("--model", type=str, default="dla", choices=["dla", "simple"])
+    p.add_argument("--model", type=str, default="vgg16", choices=["vgg16", "dla", "simple"])
     p.add_argument("--lr", type=float, default=0.1, help="learning rate")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=128)
@@ -111,7 +111,12 @@ def main() -> None:
     )
 
     print("==> Building model..", flush=True)
-    net = DLALikeCifarNet(device=device) if args.model == "dla" else SimpleCifarNet(device=device)
+    if args.model == "dla":
+        net = DLALikeCifarNet(device=device)
+    elif args.model == "simple":
+        net = SimpleCifarNet(device=device)
+    else:
+        net = VGGNet("VGG16", device=device)
     best_acc = 0.0
     start_epoch = 0
 

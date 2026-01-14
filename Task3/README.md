@@ -46,7 +46,7 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 
 常用参数：
 
-- `--model`: `dla`（默认，更深的纯卷积网络）或 `simple`（更小的 baseline）
+- `--model`: `vgg16`（默认）、`dla` 或 `simple`
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: checkpoint 路径（默认 `Task3/checkpoint/ckpt.pth`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）

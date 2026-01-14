@@ -167,6 +167,53 @@ class DLALikeCifarNet(Module):
         return x
 
 
+_VGG_CFG = {
+    "VGG11": [64, "M", 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "VGG13": [64, 64, "M", 128, 128, "M", 256, 256, "M", 512, 512, "M", 512, 512, "M"],
+    "VGG16": [64, 64, "M", 128, 128, "M", 256, 256, 256, "M", 512, 512, 512, "M", 512, 512, 512, "M"],
+    "VGG19": [64, 64, "M", 128, 128, "M", 256, 256, 256, 256, "M", 512, 512, 512, 512, "M", 512, 512, 512, 512, "M"],
+}
+
+
+class VGGNet(Module):
+    """VGG-style CIFAR-10 network using only custom CUDA ops.
+
+    Notes:
+    - This implementation omits BatchNorm (not implemented in the CUDA extension).
+    - For CIFAR-10 (32x32), after 5 MaxPool2d(2,2) the spatial size becomes 1x1.
+      We use GlobalAvgPool2d + Linear(512->10) as classifier.
+    """
+
+    def __init__(self, cfg_name: str = "VGG16", num_classes: int = 10, device: torch.device | None = None) -> None:
+        device = device or torch.device("cuda")
+        if cfg_name not in _VGG_CFG:
+            raise ValueError(f"Unknown VGG config: {cfg_name}")
+        cfg = _VGG_CFG[cfg_name]
+
+        layers: list[Module] = []
+        in_channels = 3
+        last_channels = in_channels
+        for v in cfg:
+            if v == "M":
+                layers.append(MaxPool2d(kernel=2, stride=2))
+            else:
+                out_channels = int(v)
+                layers.append(ConvReLU(in_channels, out_channels, kernel=3, stride=1, padding=1, device=device))
+                in_channels = out_channels
+                last_channels = out_channels
+
+        self.features = layers
+        self.gap = GlobalAvgPool2d()
+        self.fc = Linear(int(last_channels), int(num_classes), device=device)
+
+    def forward(self, x: Tensor) -> Tensor:
+        for layer in self.features:
+            x = layer(x)
+        x = self.gap(x)
+        x = self.fc(x)
+        return x
+
+
 class SimpleCifarNet(Module):
     def __init__(self, device: torch.device | None = None) -> None:
         device = device or torch.device("cuda")
