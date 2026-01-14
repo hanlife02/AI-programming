@@ -110,35 +110,6 @@ def global_avg_pool2d_backward(grad_out: torch.Tensor, h: int, w: int) -> torch.
     return ext().global_avg_pool2d_backward(grad_out, int(h), int(w))
 
 
-def batchnorm2d_forward_train(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return ext().batchnorm2d_forward_train(x, weight, bias, float(eps))
-
-
-def batchnorm2d_forward_eval(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, running_mean: torch.Tensor, running_var: torch.Tensor, eps: float
-) -> torch.Tensor:
-    return ext().batchnorm2d_forward_eval(x, weight, bias, running_mean, running_var, float(eps))
-
-
-def batchnorm2d_backward(
-    grad_out: torch.Tensor,
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    mean: torch.Tensor,
-    invstd: torch.Tensor,
-    need_grad_x: bool,
-    need_grad_w: bool,
-    need_grad_b: bool,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    return ext().batchnorm2d_backward(grad_out, x, weight, mean, invstd, bool(need_grad_x), bool(need_grad_w), bool(need_grad_b))
-
-
-def batchnorm2d_update_running_(running_mean: torch.Tensor, running_var: torch.Tensor, batch_mean: torch.Tensor, batch_var: torch.Tensor, momentum: float) -> None:
-    ext().batchnorm2d_update_running_(running_mean, running_var, batch_mean, batch_var, float(momentum))
-
-
 def linear_forward(x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor]) -> torch.Tensor:
     return ext().linear_forward(x, w, b)
 

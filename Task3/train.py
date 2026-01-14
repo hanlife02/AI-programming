@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-split", type=float, default=0.1)
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--ckpt", type=str, default="")
-    p.add_argument("--no-augment", action="store_true")
+    p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--backend", type=str, default="", help="DDP backend override (default: nccl).")
     p.add_argument("--no-eval", action="store_true", help="Skip validation evaluation each epoch.")
     p.add_argument("--debug-step", action="store_true", help="Run exactly 1 train step and print debug stats.")
@@ -155,13 +155,6 @@ def broadcast_params(info: DistInfo, model: SimpleCifarNet) -> None:
         dist.broadcast(p.data, src=0)
 
 
-def broadcast_buffers(info: DistInfo, model: SimpleCifarNet) -> None:
-    if not info.enabled:
-        return
-    for _, b in model.named_buffers().items():
-        dist.broadcast(b, src=0)
-
-
 def build_grad_sync(params: list[Tensor], info: DistInfo) -> Callable[[], None]:
     if not info.enabled:
         def _noop() -> None:
@@ -216,34 +209,23 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
 
     x = Tensor(images.contiguous(), requires_grad=False)
     t1 = model.conv1(x)
-    t2 = model.bn1(t1)
-    t3 = t2.relu()
+    t2 = t1.relu()
+    t3 = model.pool(t2)
     t4 = model.conv2(t3)
-    t5 = model.bn2(t4)
-    t6 = t5.relu()
-    t7 = model.pool1(t6)
-    t8 = model.conv3(t7)
-    t9 = model.bn3(t8)
-    t10 = t9.relu()
-    t11 = model.conv4(t10)
-    t12 = model.bn4(t11)
-    t13 = t12.relu()
-    t14 = model.pool2(t13)
-    t15 = model.conv5(t14)
-    t16 = model.bn5(t15)
-    t17 = t16.relu()
-    t18 = model.conv6(t17)
-    t19 = model.bn6(t18)
-    t20 = t19.relu()
-    t21 = model.pool3(t20)
-    t22 = model.gap(t21)
-    logits = model.fc(t22)
+    t5 = t4.relu()
+    t6 = model.pool(t5)
+    t7 = t6.view(int(t6.data.size(0)), -1)
+    t8 = model.fc1(t7)
+    t9 = t8.relu()
+    t10 = model.fc2(t9)
+    t11 = t10.relu()
+    logits = model.fc3(t11)
     loss = logits.cross_entropy(labels)
 
     if info.rank == 0:
         print(f"[debug] conv1 out: {_tensor_stats(t1.data)}", flush=True)
-        print(f"[debug] pool3 out: {_tensor_stats(t21.data)}", flush=True)
-        print(f"[debug] gap out : {_tensor_stats(t22.data)}", flush=True)
+        print(f"[debug] pool2 out: {_tensor_stats(t6.data)}", flush=True)
+        print(f"[debug] flat out : {_tensor_stats(t7.data)}", flush=True)
         print(f"[debug] logits  : {_tensor_stats(logits.data)}", flush=True)
         print(f"[debug] loss    : {loss.data.item():.6f}", flush=True)
 
@@ -255,12 +237,14 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
         for k in [
             "conv1.w",
             "conv2.w",
-            "conv3.w",
-            "conv4.w",
-            "conv5.w",
-            "conv6.w",
-            "fc.w",
-            "fc.b",
+            "conv1.b",
+            "conv2.b",
+            "fc1.w",
+            "fc1.b",
+            "fc2.w",
+            "fc2.b",
+            "fc3.w",
+            "fc3.b",
         ]:
             p = named.get(k)
             if p is None:
@@ -281,7 +265,7 @@ def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.T
     before = {}
     if info.rank == 0:
         for name, p in model.named_parameters().items():
-            if name in {"conv1.w", "conv6.w", "fc.w", "fc.b"}:
+            if name in {"conv1.w", "conv2.w", "fc3.w", "fc3.b"}:
                 before[name] = p.data.detach().clone()
 
     optim.step()
@@ -325,7 +309,7 @@ def main() -> None:
         f"per_gpu_batch={args.batch_size} global_batch={args.batch_size * info.world_size}",
     )
 
-    train_t, test_t = build_transforms(not args.no_augment)
+    train_t, test_t = build_transforms(bool(args.augment))
     if info.enabled and info.rank != 0:
         dist.barrier()
         train_ds_aug = torchvision.datasets.CIFAR10(root=str(data_dir), train=True, download=False, transform=train_t)
@@ -385,7 +369,6 @@ def main() -> None:
     model = SimpleCifarNet(device=device)
     rank0_print(info, f"model params: {sum(int(p.data.numel()) for p in model.parameters()):,}")
     broadcast_params(info, model)
-    broadcast_buffers(info, model)
 
     params = list(model.parameters())
     optim = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
@@ -464,7 +447,6 @@ def main() -> None:
             )
 
             if (not args.no_eval) and val_loader is not None:
-                broadcast_buffers(info, model)
                 model.eval()
                 v_correct = 0
                 v_seen = 0
@@ -493,7 +475,6 @@ def main() -> None:
                             "val_acc": val_acc,
                             "world_size": info.world_size,
                             "model": {k: v.data for k, v in model.named_parameters().items()},
-                            "buffers": {k: v for k, v in model.named_buffers().items()},
                         },
                         ckpt_path,
                     )

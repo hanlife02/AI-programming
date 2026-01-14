@@ -108,12 +108,6 @@ def main() -> None:
         if name not in state:
             raise KeyError(f"Missing parameter in checkpoint: {name}")
         p.data.copy_(state[name].to(device))
-
-    buffers = ckpt.get("buffers", {})
-    for name, b in model.named_buffers().items():
-        if name in buffers:
-            b.copy_(buffers[name].to(device))
-
     model.eval()
 
     if info.enabled and info.rank != 0:

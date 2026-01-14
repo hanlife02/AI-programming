@@ -36,6 +36,19 @@ class Tensor:
     def detach(self) -> "Tensor":
         return Tensor(self.data, requires_grad=False)
 
+    def view(self, *shape: int) -> "Tensor":
+        y = self.data.view(*shape)
+        out = Tensor(y, requires_grad=self.requires_grad)
+
+        def _backward(g: torch.Tensor) -> None:
+            if self.requires_grad:
+                dx = g.view_as(self.data)
+                self.grad = dx if self.grad is None else (self.grad + dx)
+
+        if out.requires_grad:
+            out._node = _Node((self,), _backward)
+        return out
+
     def zero_grad(self) -> None:
         self.grad = None
 
