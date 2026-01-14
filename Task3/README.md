@@ -24,6 +24,13 @@ python setup.py build_ext --inplace
 TASK3_CUDA_ARCH_LIST="8.6" python setup.py build_ext --inplace
 ```
 
+如果编译能过但运行时报 `no kernel image is available for execution on the device`，说明扩展没有为你的 GPU 生成可执行的内核镜像。此时请确保 **最高档架构带 `+PTX`**（便于驱动在新 GPU 上 JIT）：
+
+```bash
+# 仅为示例：用你环境里 nvcc 支持的最高架构（例如 9.0）并加 +PTX
+TASK3_CUDA_ARCH_LIST="9.0+PTX" python setup.py build_ext --inplace
+```
+
 ## 2) 训练
 
 ```bash
@@ -48,6 +55,7 @@ torchrun --standalone --nproc_per_node=2 Task3/train.py --epochs 50 --batch-size
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: 最优验证集 checkpoint 路径（默认 `Task3/checkpoints/task3_ckpt.pt`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
+- `--debug-step`: 只跑 1 个 step 并打印激活/梯度/更新幅度（用于排查训练停在 10% 左右的问题）
 
 ## 3) 说明
 

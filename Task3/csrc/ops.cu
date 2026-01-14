@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <c10/cuda/CUDAGuard.h>
+#include <cstdint>
 #include <tuple>
 
 namespace {
@@ -20,6 +21,29 @@ inline void check_float_cuda(const torch::Tensor& t, const char* name) {
     TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
     TORCH_CHECK(t.is_contiguous(), name, " must be contiguous");
     TORCH_CHECK(t.scalar_type() == at::kFloat, name, " must be float32");
+}
+
+__device__ __forceinline__ float relu(float x) { return x > 0.0f ? x : 0.0f; }
+
+__inline__ __device__ float warpReduceSum(float val) {
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+__inline__ __device__ float blockReduceSum(float val, float* shared) {
+    int lane = threadIdx.x & (warpSize - 1);
+    int wid = threadIdx.x >> 5;
+
+    val = warpReduceSum(val);
+    if (lane == 0) shared[wid] = val;
+    __syncthreads();
+
+    int num_warps = (blockDim.x + warpSize - 1) / warpSize;
+    val = (threadIdx.x < num_warps) ? shared[lane] : 0.0f;
+    if (wid == 0) val = warpReduceSum(val);
+    return val;
 }
 
 __global__ void conv2d_fwd_kernel(const float* __restrict__ x, const float* __restrict__ w,
@@ -57,6 +81,103 @@ __global__ void conv2d_fwd_kernel(const float* __restrict__ x, const float* __re
         }
     }
     y[(((n * Cout + oc) * Hout) + oh) * Wout + ow] = acc;
+}
+
+template <int TILE_H, int TILE_W, int TILE_C>
+__global__ void conv2d_fwd_3x3s1p1_tiled_kernel(const float* __restrict__ x, const float* __restrict__ w,
+                                                const float* __restrict__ b, float* __restrict__ y, int N, int Cin,
+                                                int Hin, int Win, int Cout, int Hout, int Wout, bool has_bias) {
+    static_assert(TILE_H > 0 && TILE_W > 0 && TILE_C > 0, "invalid tile sizes");
+    constexpr int Kh = 3;
+    constexpr int Kw = 3;
+    constexpr int PAD = 1;
+
+    int ow = blockIdx.x * TILE_W + threadIdx.x;
+    int oh = blockIdx.y * TILE_H + threadIdx.y;
+    int nc = blockIdx.z;
+    int n = nc / Cout;
+    int oc = nc - n * Cout;
+
+    float acc = 0.0f;
+    if (n < N && oc < Cout && oh < Hout && ow < Wout && has_bias) acc = b[oc];
+
+    __shared__ float s_x[TILE_C][TILE_H + 2][TILE_W + 2];
+    __shared__ float s_w[TILE_C][Kh][Kw];
+
+    int tid = threadIdx.y * TILE_W + threadIdx.x;
+
+    for (int ic0 = 0; ic0 < Cin; ic0 += TILE_C) {
+        // Load weights [TILE_C, 3, 3]
+        for (int idx = tid; idx < TILE_C * Kh * Kw; idx += TILE_H * TILE_W) {
+            int t = idx;
+            int c = t / (Kh * Kw);
+            t -= c * (Kh * Kw);
+            int kh = t / Kw;
+            int kw = t - kh * Kw;
+            int ic = ic0 + c;
+            float v = 0.0f;
+            if (oc < Cout && ic < Cin) {
+                v = w[(((oc * Cin + ic) * Kh) + kh) * Kw + kw];
+            }
+            s_w[c][kh][kw] = v;
+        }
+
+        // Load input tile [TILE_C, TILE_H+2, TILE_W+2]
+        constexpr int TILE_IN_H = TILE_H + 2;
+        constexpr int TILE_IN_W = TILE_W + 2;
+        constexpr int TILE_IN_HW = TILE_IN_H * TILE_IN_W;
+        for (int idx = tid; idx < TILE_C * TILE_IN_HW; idx += TILE_H * TILE_W) {
+            int c = idx / TILE_IN_HW;
+            int rem = idx - c * TILE_IN_HW;
+            int th = rem / TILE_IN_W;
+            int tw = rem - th * TILE_IN_W;
+            int ic = ic0 + c;
+            int ih = blockIdx.y * TILE_H + th - PAD;
+            int iw = blockIdx.x * TILE_W + tw - PAD;
+            float v = 0.0f;
+            if (n < N && ic < Cin && (unsigned)ih < (unsigned)Hin && (unsigned)iw < (unsigned)Win) {
+                v = x[(((n * Cin + ic) * Hin) + ih) * Win + iw];
+            }
+            s_x[c][th][tw] = v;
+        }
+        __syncthreads();
+
+        if (n < N && oc < Cout && oh < Hout && ow < Wout) {
+            #pragma unroll
+            for (int c = 0; c < TILE_C; ++c) {
+                int ic = ic0 + c;
+                if (ic >= Cin) break;
+                float x00 = s_x[c][threadIdx.y + 0][threadIdx.x + 0];
+                float x01 = s_x[c][threadIdx.y + 0][threadIdx.x + 1];
+                float x02 = s_x[c][threadIdx.y + 0][threadIdx.x + 2];
+                float x10 = s_x[c][threadIdx.y + 1][threadIdx.x + 0];
+                float x11 = s_x[c][threadIdx.y + 1][threadIdx.x + 1];
+                float x12 = s_x[c][threadIdx.y + 1][threadIdx.x + 2];
+                float x20 = s_x[c][threadIdx.y + 2][threadIdx.x + 0];
+                float x21 = s_x[c][threadIdx.y + 2][threadIdx.x + 1];
+                float x22 = s_x[c][threadIdx.y + 2][threadIdx.x + 2];
+
+                float w00 = s_w[c][0][0];
+                float w01 = s_w[c][0][1];
+                float w02 = s_w[c][0][2];
+                float w10 = s_w[c][1][0];
+                float w11 = s_w[c][1][1];
+                float w12 = s_w[c][1][2];
+                float w20 = s_w[c][2][0];
+                float w21 = s_w[c][2][1];
+                float w22 = s_w[c][2][2];
+
+                acc += x00 * w00 + x01 * w01 + x02 * w02;
+                acc += x10 * w10 + x11 * w11 + x12 * w12;
+                acc += x20 * w20 + x21 * w21 + x22 * w22;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (n < N && oc < Cout && oh < Hout && ow < Wout) {
+        y[(((n * Cout + oc) * Hout) + oh) * Wout + ow] = acc;
+    }
 }
 
 __global__ void conv2d_bwd_input_kernel(const float* __restrict__ grad_out, const float* __restrict__ w,
@@ -157,8 +278,7 @@ __global__ void conv2d_bwd_bias_kernel(const float* __restrict__ grad_out, float
 __global__ void relu_fwd_kernel(const float* __restrict__ x, float* __restrict__ y, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    float v = x[i];
-    y[i] = v > 0.0f ? v : 0.0f;
+    y[i] = relu(x[i]);
 }
 
 __global__ void relu_bwd_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
@@ -166,6 +286,33 @@ __global__ void relu_bwd_kernel(const float* __restrict__ grad_out, const float*
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     grad_x[i] = x[i] > 0.0f ? grad_out[i] : 0.0f;
+}
+
+__global__ void relu_fwd_vec4_kernel(const float* __restrict__ x, float* __restrict__ y, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int off = idx * 4;
+    if (off >= n4) return;
+    float4 v = reinterpret_cast<const float4*>(x)[idx];
+    v.x = relu(v.x);
+    v.y = relu(v.y);
+    v.z = relu(v.z);
+    v.w = relu(v.w);
+    reinterpret_cast<float4*>(y)[idx] = v;
+}
+
+__global__ void relu_bwd_vec4_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
+                                     float* __restrict__ grad_x, int n4) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int off = idx * 4;
+    if (off >= n4) return;
+    float4 go = reinterpret_cast<const float4*>(grad_out)[idx];
+    float4 xv = reinterpret_cast<const float4*>(x)[idx];
+    float4 gx;
+    gx.x = xv.x > 0.0f ? go.x : 0.0f;
+    gx.y = xv.y > 0.0f ? go.y : 0.0f;
+    gx.z = xv.z > 0.0f ? go.z : 0.0f;
+    gx.w = xv.w > 0.0f ? go.w : 0.0f;
+    reinterpret_cast<float4*>(grad_x)[idx] = gx;
 }
 
 __global__ void maxpool2d_fwd_kernel(const float* __restrict__ x, float* __restrict__ y, int32_t* __restrict__ idx,
@@ -258,6 +405,39 @@ __global__ void linear_fwd_kernel(const float* __restrict__ x, const float* __re
     y[n * Out + o] = acc;
 }
 
+template <int TILE>
+__global__ void linear_fwd_tiled_kernel(const float* __restrict__ x, const float* __restrict__ w,
+                                        const float* __restrict__ b, float* __restrict__ y, int N, int In, int Out,
+                                        bool has_bias) {
+    int row = blockIdx.y * TILE + threadIdx.y;
+    int col = blockIdx.x * TILE + threadIdx.x;
+
+    __shared__ float s_x[TILE][TILE];
+    __shared__ float s_w[TILE][TILE];
+
+    float acc = 0.0f;
+    if (has_bias && row < N && col < Out) acc = b[col];
+
+    int tiles = (In + TILE - 1) / TILE;
+    for (int t = 0; t < tiles; ++t) {
+        int kx = t * TILE + threadIdx.x;
+        int kw = t * TILE + threadIdx.y;
+
+        s_x[threadIdx.y][threadIdx.x] = (row < N && kx < In) ? x[row * In + kx] : 0.0f;
+        // w is [Out, In]; load it as B[K, Out] where B[k, col] = w[col, k]
+        s_w[threadIdx.y][threadIdx.x] = (col < Out && kw < In) ? w[col * In + kw] : 0.0f;
+        __syncthreads();
+
+        #pragma unroll
+        for (int i = 0; i < TILE; ++i) {
+            acc += s_x[threadIdx.y][i] * s_w[i][threadIdx.x];
+        }
+        __syncthreads();
+    }
+
+    if (row < N && col < Out) y[row * Out + col] = acc;
+}
+
 __global__ void linear_bwd_input_kernel(const float* __restrict__ grad_out, const float* __restrict__ w,
                                         float* __restrict__ grad_x, int N, int In, int Out) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -303,23 +483,27 @@ __global__ void linear_bwd_bias_kernel(const float* __restrict__ grad_out, float
 
 __global__ void cross_entropy_fwd_kernel(const float* __restrict__ logits, const int64_t* __restrict__ targets,
                                          float* __restrict__ probs, float* __restrict__ loss, int N, int C) {
+    __shared__ float shared[32];  // warp partial sums
     int n = blockIdx.x * blockDim.x + threadIdx.x;
-    if (n >= N) return;
-    const float* l = logits + n * C;
-    float maxv = l[0];
-    for (int c = 1; c < C; ++c) maxv = fmaxf(maxv, l[c]);
-    float sum = 0.0f;
-    for (int c = 0; c < C; ++c) sum += expf(l[c] - maxv);
-    float inv = 1.0f / sum;
-    int64_t t = targets[n];
-    float p_t = 0.0f;
-    for (int c = 0; c < C; ++c) {
-        float p = expf(l[c] - maxv) * inv;
-        probs[n * C + c] = p;
-        if (c == (int)t) p_t = p;
+    float sample_loss = 0.0f;
+    if (n < N) {
+        const float* l = logits + n * C;
+        float maxv = l[0];
+        for (int c = 1; c < C; ++c) maxv = fmaxf(maxv, l[c]);
+        float sum = 0.0f;
+        for (int c = 0; c < C; ++c) sum += expf(l[c] - maxv);
+        float inv = 1.0f / sum;
+        int64_t t = targets[n];
+        float p_t = 0.0f;
+        for (int c = 0; c < C; ++c) {
+            float p = expf(l[c] - maxv) * inv;
+            probs[n * C + c] = p;
+            if (c == (int)t) p_t = p;
+        }
+        sample_loss = -logf(fmaxf(p_t, 1e-12f));
     }
-    float sample_loss = -logf(fmaxf(p_t, 1e-12f));
-    atomicAdd(loss, sample_loss);
+    float block_loss = blockReduceSum(sample_loss, shared);
+    if (threadIdx.x == 0) atomicAdd(loss, block_loss);
 }
 
 __global__ void scale_kernel(float* __restrict__ x, int n, float s) {
@@ -353,6 +537,38 @@ __global__ void sgd_update_kernel(float* __restrict__ param, const float* __rest
     if (has_velocity) vel[i] = v;
 }
 
+__global__ void sgd_update_vec4_kernel(float* __restrict__ param, const float* __restrict__ grad,
+                                       float* __restrict__ vel, int n4, float lr, float momentum,
+                                       float weight_decay) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int off = idx * 4;
+    if (off >= n4) return;
+
+    float4 p = reinterpret_cast<float4*>(param)[idx];
+    float4 g = reinterpret_cast<const float4*>(grad)[idx];
+    float4 v = reinterpret_cast<float4*>(vel)[idx];
+
+    if (weight_decay != 0.0f) {
+        g.x += weight_decay * p.x;
+        g.y += weight_decay * p.y;
+        g.z += weight_decay * p.z;
+        g.w += weight_decay * p.w;
+    }
+
+    v.x = momentum * v.x + g.x;
+    v.y = momentum * v.y + g.y;
+    v.z = momentum * v.z + g.z;
+    v.w = momentum * v.w + g.w;
+
+    p.x -= lr * v.x;
+    p.y -= lr * v.y;
+    p.z -= lr * v.z;
+    p.w -= lr * v.w;
+
+    reinterpret_cast<float4*>(param)[idx] = p;
+    reinterpret_cast<float4*>(vel)[idx] = v;
+}
+
 }  // namespace
 
 torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b, int64_t stride,
@@ -380,10 +596,17 @@ torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
 
     dim3 block(16, 16, 1);
     dim3 grid((Wout + block.x - 1) / block.x, (Hout + block.y - 1) / block.y, N * Cout);
-    conv2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
-                                                  b.has_value() ? b->data_ptr<float>() : nullptr, y.data_ptr<float>(),
-                                                  N, Cin, Hin, Win, Cout, Kh, Kw, Hout, Wout, (int)stride,
-                                                  (int)padding, b.has_value());
+    if (Kh == 3 && Kw == 3 && stride == 1 && padding == 1) {
+        conv2d_fwd_3x3s1p1_tiled_kernel<16, 16, 4>
+            <<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
+                                         b.has_value() ? b->data_ptr<float>() : nullptr, y.data_ptr<float>(), N, Cin,
+                                         Hin, Win, Cout, Hout, Wout, b.has_value());
+    } else {
+        conv2d_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
+                                                      b.has_value() ? b->data_ptr<float>() : nullptr,
+                                                      y.data_ptr<float>(), N, Cin, Hin, Win, Cout, Kh, Kw, Hout, Wout,
+                                                      (int)stride, (int)padding, b.has_value());
+    }
     return y;
 }
 
@@ -446,8 +669,21 @@ torch::Tensor relu_forward(torch::Tensor x) {
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
     int n = (int)x.numel();
     int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    relu_fwd_kernel<<<blocks, threads, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(), n);
+    const auto xp = (std::uintptr_t)x.data_ptr<float>();
+    const auto yp = (std::uintptr_t)y.data_ptr<float>();
+    if ((xp % alignof(float4) == 0) && (yp % alignof(float4) == 0)) {
+        int n4 = (n / 4) * 4;
+        int blocks4 = ((n4 / 4) + threads - 1) / threads;
+        if (n4 > 0) relu_fwd_vec4_kernel<<<blocks4, threads, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(), n4);
+        int tail = n - n4;
+        if (tail > 0) {
+            int blocks = (tail + threads - 1) / threads;
+            relu_fwd_kernel<<<blocks, threads, 0, stream>>>(x.data_ptr<float>() + n4, y.data_ptr<float>() + n4, tail);
+        }
+    } else {
+        int blocks = (n + threads - 1) / threads;
+        relu_fwd_kernel<<<blocks, threads, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(), n);
+    }
     return y;
 }
 
@@ -459,9 +695,27 @@ torch::Tensor relu_backward(torch::Tensor grad_out, torch::Tensor x) {
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
     int n = (int)x.numel();
     int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    relu_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
-                                                   grad_x.data_ptr<float>(), n);
+    const auto gop = (std::uintptr_t)grad_out.data_ptr<float>();
+    const auto xp = (std::uintptr_t)x.data_ptr<float>();
+    const auto gxp = (std::uintptr_t)grad_x.data_ptr<float>();
+    if ((gop % alignof(float4) == 0) && (xp % alignof(float4) == 0) && (gxp % alignof(float4) == 0)) {
+        int n4 = (n / 4) * 4;
+        int blocks4 = ((n4 / 4) + threads - 1) / threads;
+        if (n4 > 0) {
+            relu_bwd_vec4_kernel<<<blocks4, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
+                                                                 grad_x.data_ptr<float>(), n4);
+        }
+        int tail = n - n4;
+        if (tail > 0) {
+            int blocks = (tail + threads - 1) / threads;
+            relu_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>() + n4, x.data_ptr<float>() + n4,
+                                                           grad_x.data_ptr<float>() + n4, tail);
+        }
+    } else {
+        int blocks = (n + threads - 1) / threads;
+        relu_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
+                                                       grad_x.data_ptr<float>(), n);
+    }
     return grad_x;
 }
 
@@ -552,12 +806,12 @@ torch::Tensor linear_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
     auto y = torch::empty({N, Out}, x.options());
     c10::cuda::CUDAGuard guard(x.device());
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
-    int threads = 256;
-    dim3 block(threads, 1, 1);
-    dim3 grid((Out + threads - 1) / threads, N, 1);
-    linear_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
-                                                 b.has_value() ? b->data_ptr<float>() : nullptr, y.data_ptr<float>(),
-                                                 N, In, Out, b.has_value());
+    constexpr int TILE = 16;
+    dim3 block(TILE, TILE, 1);
+    dim3 grid((Out + TILE - 1) / TILE, (N + TILE - 1) / TILE, 1);
+    linear_fwd_tiled_kernel<TILE><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
+                                                             b.has_value() ? b->data_ptr<float>() : nullptr,
+                                                             y.data_ptr<float>(), N, In, Out, b.has_value());
     return y;
 }
 
@@ -662,6 +916,28 @@ void sgd_update_(torch::Tensor param, torch::Tensor grad, c10::optional<torch::T
     cudaStream_t stream = at::cuda::getDefaultCUDAStream();
     int n = (int)param.numel();
     int threads = 256;
+    if (velocity.has_value() && momentum != 0.0) {
+        const auto pp = (std::uintptr_t)param.data_ptr<float>();
+        const auto gp = (std::uintptr_t)grad.data_ptr<float>();
+        const auto vp = (std::uintptr_t)velocity->data_ptr<float>();
+        if ((pp % alignof(float4) == 0) && (gp % alignof(float4) == 0) && (vp % alignof(float4) == 0)) {
+            int n4 = (n / 4) * 4;
+            int blocks4 = ((n4 / 4) + threads - 1) / threads;
+            if (n4 > 0) {
+                sgd_update_vec4_kernel<<<blocks4, threads, 0, stream>>>(
+                    param.data_ptr<float>(), grad.data_ptr<float>(), velocity->data_ptr<float>(), n4, (float)lr,
+                    (float)momentum, (float)weight_decay);
+            }
+            int tail = n - n4;
+            if (tail > 0) {
+                int blocks = (tail + threads - 1) / threads;
+                sgd_update_kernel<<<blocks, threads, 0, stream>>>(param.data_ptr<float>() + n4, grad.data_ptr<float>() + n4,
+                                                                 velocity->data_ptr<float>() + n4, tail, (float)lr,
+                                                                 (float)momentum, (float)weight_decay, true);
+            }
+            return;
+        }
+    }
     int blocks = (n + threads - 1) / threads;
     sgd_update_kernel<<<blocks, threads, 0, stream>>>(param.data_ptr<float>(), grad.data_ptr<float>(),
                                                      velocity.has_value() ? velocity->data_ptr<float>() : nullptr, n,

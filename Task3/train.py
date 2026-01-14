@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-augment", action="store_true")
     p.add_argument("--backend", type=str, default="", help="DDP backend override (default: nccl).")
     p.add_argument("--no-eval", action="store_true", help="Skip validation evaluation each epoch.")
+    p.add_argument("--debug-step", action="store_true", help="Run exactly 1 train step and print debug stats.")
     return p.parse_args()
 
 
@@ -186,6 +187,89 @@ def build_grad_sync(params: list[Tensor], info: DistInfo) -> Callable[[], None]:
     return _sync
 
 
+def _tensor_stats(x: torch.Tensor) -> str:
+    x_f = x.float()
+    return (
+        f"shape={tuple(x.shape)} dtype={str(x.dtype).replace('torch.', '')} "
+        f"mean={x_f.mean().item():.4g} std={x_f.std(unbiased=False).item():.4g} "
+        f"min={x_f.min().item():.4g} max={x_f.max().item():.4g}"
+    )
+
+
+def _debug_one_step(model: SimpleCifarNet, images: torch.Tensor, labels: torch.Tensor, optim: SGD, sync_grads: Callable[[], None], info: DistInfo) -> None:
+    try:
+        from Task3.minifw import ops as fw_ops
+    except ModuleNotFoundError:
+        from minifw import ops as fw_ops
+
+    if info.rank == 0:
+        ext_mod = fw_ops.ext()
+        ext_path = getattr(ext_mod, "__file__", "<unknown>")
+        print(f"[debug] task3_ops loaded from: {ext_path}", flush=True)
+
+    x = Tensor(images.contiguous(), requires_grad=False)
+    t1 = model.conv1(x)
+    t2 = t1.relu()
+    t3 = model.conv2(t2)
+    t4 = t3.relu()
+    t5 = model.pool1(t4)
+    t6 = model.conv3(t5)
+    t7 = t6.relu()
+    t8 = model.pool2(t7)
+    t9 = model.gap(t8)
+    logits = model.fc(t9)
+    loss = logits.cross_entropy(labels)
+
+    if info.rank == 0:
+        print(f"[debug] conv1 out: {_tensor_stats(t1.data)}", flush=True)
+        print(f"[debug] pool2 out: {_tensor_stats(t8.data)}", flush=True)
+        print(f"[debug] gap out : {_tensor_stats(t9.data)}", flush=True)
+        print(f"[debug] logits  : {_tensor_stats(logits.data)}", flush=True)
+        print(f"[debug] loss    : {loss.data.item():.6f}", flush=True)
+
+    loss.backward()
+    sync_grads()
+
+    if info.rank == 0:
+        named = model.named_parameters()
+        for k in ["conv1.w", "conv1.b", "conv2.w", "conv2.b", "conv3.w", "conv3.b", "fc.w", "fc.b"]:
+            p = named.get(k)
+            if p is None:
+                continue
+            g = p.grad
+            if g is None:
+                print(f"[debug] grad {k}: None", flush=True)
+            else:
+                g_f = g.float()
+                print(
+                    f"[debug] grad {k}: mean={g_f.mean().item():.4g} "
+                    f"abs_mean={g_f.abs().mean().item():.4g} max={g_f.abs().max().item():.4g} "
+                    f"norm={g_f.norm().item():.4g}",
+                    flush=True,
+                )
+
+    # check parameters actually change after the step
+    before = {}
+    if info.rank == 0:
+        for name, p in model.named_parameters().items():
+            if name in {"conv1.w", "fc.w", "fc.b"}:
+                before[name] = p.data.detach().clone()
+
+    optim.step()
+    optim.zero_grad()
+
+    if info.rank == 0:
+        for name, p in model.named_parameters().items():
+            if name not in before:
+                continue
+            delta = (p.data - before[name]).float()
+            print(
+                f"[debug] update {name}: abs_mean={delta.abs().mean().item():.4g} "
+                f"max={delta.abs().max().item():.4g} norm={delta.norm().item():.4g}",
+                flush=True,
+            )
+
+
 def main() -> None:
     args = parse_args()
     info = get_dist_info()
@@ -222,7 +306,8 @@ def main() -> None:
             dist.barrier()
     train_ds_plain = torchvision.datasets.CIFAR10(root=str(data_dir), train=True, download=False, transform=test_t)
 
-    g = torch.Generator().manual_seed(args.seed + info.rank)
+    # Important: train/val split should be identical across ranks for correctness/reproducibility.
+    g = torch.Generator().manual_seed(args.seed)
     total = len(train_ds_aug)
     val_size = int(total * max(0.0, min(0.9, float(args.val_split))))
     idx = torch.randperm(total, generator=g).tolist()
@@ -296,6 +381,12 @@ def main() -> None:
             for step, (images, labels) in enumerate(prefetch, start=1):
                 images = images.contiguous()
                 labels = labels.to(device, non_blocking=True)
+
+                if args.debug_step:
+                    model.train()
+                    optim.zero_grad()
+                    _debug_one_step(model, images, labels, optim, sync_grads, info)
+                    return
 
                 logits = model(Tensor(images, requires_grad=False))
                 loss = logits.cross_entropy(labels)
@@ -383,4 +474,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -48,6 +48,25 @@ def _base_arch(arch: str) -> str:
     return arch.replace("+PTX", "").strip()
 
 
+def _arch_key(arch: str) -> tuple[int, int]:
+    major, minor = arch.split(".", 1)
+    return int(major), int(minor)
+
+
+def _ensure_highest_has_ptx(arch_list: list[str]) -> list[str]:
+    if not arch_list:
+        return arch_list
+    bases = [_base_arch(a) for a in arch_list]
+    highest = max(bases, key=_arch_key)
+    out: list[str] = []
+    for a in arch_list:
+        if _base_arch(a) == highest:
+            out.append(f"{highest}+PTX")
+        else:
+            out.append(_base_arch(a))
+    return out
+
+
 def _configure_cuda_arch_list() -> None:
     supported = _nvcc_supported_arches()
     env_arch = os.environ.get("TORCH_CUDA_ARCH_LIST", "").strip()
@@ -69,8 +88,10 @@ def _configure_cuda_arch_list() -> None:
             if _base_arch(a) in supported:
                 filtered.append(a)
         if not filtered:
-            filtered = [max(supported, key=lambda x: tuple(map(int, x.split("."))))]
+            filtered = [max(supported, key=_arch_key) + "+PTX"]
         chosen = filtered
+
+    chosen = _ensure_highest_has_ptx(chosen)
 
     if env_arch and chosen != _parse_arch_list(env_arch):
         print(
