@@ -27,6 +27,7 @@ def _load_ext():
 
 _ext = None
 _conv2d_op_cache = {}
+_bn2d_op_cache = {}
 
 
 def ext():
@@ -45,6 +46,15 @@ def _conv2d_op(stride: int, padding: int, has_bias: bool):
     return op
 
 
+def _bn2d_op(momentum: float, eps: float):
+    key = (float(momentum), float(eps))
+    op = _bn2d_op_cache.get(key)
+    if op is None:
+        op = ext().BatchNorm2dOp(key[0], key[1])
+        _bn2d_op_cache[key] = op
+    return op
+
+
 @dataclass(frozen=True)
 class MaxPoolContext:
     indices: torch.Tensor
@@ -58,6 +68,14 @@ class MaxPoolContext:
 class CrossEntropyContext:
     targets: torch.Tensor
     probs: torch.Tensor
+
+
+@dataclass(frozen=True)
+class BatchNorm2dContext:
+    saved_mean: torch.Tensor
+    saved_invstd: torch.Tensor
+    momentum: float
+    eps: float
 
 
 def conv2d_forward(x: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor], stride: int, padding: int) -> torch.Tensor:
@@ -139,3 +157,41 @@ def cross_entropy_backward(grad_out: torch.Tensor, ctx: CrossEntropyContext) -> 
 
 def sgd_update_(param: torch.Tensor, grad: torch.Tensor, velocity: Optional[torch.Tensor], lr: float, momentum: float, weight_decay: float) -> None:
     ext().sgd_update_(param, grad, velocity, float(lr), float(momentum), float(weight_decay))
+
+
+def batchnorm2d_forward(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    running_mean: torch.Tensor,
+    running_var: torch.Tensor,
+    training: bool,
+    momentum: float,
+    eps: float,
+) -> tuple[torch.Tensor, BatchNorm2dContext]:
+    y, mean, invstd = _bn2d_op(momentum, eps).forward(x, weight, bias, running_mean, running_var, bool(training))
+    return y, BatchNorm2dContext(saved_mean=mean, saved_invstd=invstd, momentum=float(momentum), eps=float(eps))
+
+
+def batchnorm2d_backward(
+    grad_out: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    saved_mean: torch.Tensor,
+    saved_invstd: torch.Tensor,
+    momentum: float,
+    eps: float,
+    need_grad_x: bool,
+    need_grad_w: bool,
+    need_grad_b: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _bn2d_op(momentum, eps).backward(
+        grad_out,
+        x,
+        weight,
+        saved_mean,
+        saved_invstd,
+        bool(need_grad_x),
+        bool(need_grad_w),
+        bool(need_grad_b),
+    )

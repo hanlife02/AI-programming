@@ -203,3 +203,65 @@ class Tensor:
         if out.requires_grad:
             out._node = _Node((self,), _backward)
         return out
+
+    def reshape(self, *shape: int) -> "Tensor":
+        out_data = self.data.reshape(*shape)
+        out = Tensor(out_data, requires_grad=self.requires_grad)
+
+        def _backward(g: torch.Tensor) -> None:
+            if self.requires_grad:
+                dx = g.reshape(self.data.shape)
+                self.grad = dx if self.grad is None else (self.grad + dx)
+
+        if out.requires_grad:
+            out._node = _Node((self,), _backward)
+        return out
+
+    def batchnorm2d(
+        self,
+        weight: "Tensor",
+        bias: "Tensor",
+        running_mean: torch.Tensor,
+        running_var: torch.Tensor,
+        training: bool,
+        momentum: float = 0.1,
+        eps: float = 1e-5,
+    ) -> "Tensor":
+        y, ctx = ops.batchnorm2d_forward(
+            self.data,
+            weight.data,
+            bias.data,
+            running_mean,
+            running_var,
+            bool(training),
+            float(momentum),
+            float(eps),
+        )
+        out = Tensor(y, requires_grad=self.requires_grad or weight.requires_grad or bias.requires_grad)
+
+        def _backward(g: torch.Tensor) -> None:
+            need_dx = self.requires_grad
+            need_dw = weight.requires_grad
+            need_db = bias.requires_grad
+            dx, dw, db = ops.batchnorm2d_backward(
+                g,
+                self.data,
+                weight.data,
+                ctx.saved_mean,
+                ctx.saved_invstd,
+                momentum=ctx.momentum,
+                eps=ctx.eps,
+                need_grad_x=need_dx,
+                need_grad_w=need_dw,
+                need_grad_b=need_db,
+            )
+            if need_dx:
+                self.grad = dx if self.grad is None else (self.grad + dx)
+            if need_dw:
+                weight.grad = dw if weight.grad is None else (weight.grad + dw)
+            if need_db:
+                bias.grad = db if bias.grad is None else (bias.grad + db)
+
+        if out.requires_grad:
+            out._node = _Node((self, weight, bias), _backward)
+        return out

@@ -15,12 +15,12 @@ from pathlib import Path
 import torch
 
 try:
-    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
+    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
     from Task3.minifw.optim import SGD
     from Task3.minifw.tensor import Tensor
     from Task3.utils import progress_bar
 except ModuleNotFoundError:  # supports: cd Task3 && python train.py
-    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
+    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
     from minifw.optim import SGD
     from minifw.tensor import Tensor
     from utils import progress_bar
@@ -116,7 +116,7 @@ def main() -> None:
     elif args.model == "simple":
         net = SimpleCifarNet(device=device)
     else:
-        net = VGGNet("VGG16", device=device)
+        net = VGG("VGG16", device=device)
     best_acc = 0.0
     start_epoch = 0
 

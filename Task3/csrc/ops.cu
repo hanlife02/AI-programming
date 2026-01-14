@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <cstdint>
 #include <tuple>
 
@@ -610,6 +611,115 @@ __global__ void linear_bwd_bias_kernel(const float* __restrict__ grad_out, float
     if (threadIdx.x == 0) grad_b[o] = buf[0];
 }
 
+__global__ void bn_stats_kernel(const float* __restrict__ x, float* __restrict__ mean, float* __restrict__ var,
+                                int N, int C, int H, int W) {
+    int c = blockIdx.x;
+    if (c >= C) return;
+    int HW = H * W;
+    int M = N * HW;
+
+    float sum = 0.0f;
+    float sumsq = 0.0f;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        float v = x[((n * C + c) * HW) + hw];
+        sum += v;
+        sumsq += v * v;
+    }
+
+    __shared__ float shared_sum[32];
+    __shared__ float shared_sumsq[32];
+    float s0 = blockReduceSum(sum, shared_sum);
+    float s1 = blockReduceSum(sumsq, shared_sumsq);
+    if (threadIdx.x == 0) {
+        float m = s0 / (float)M;
+        float vv = s1 / (float)M - m * m;
+        mean[c] = m;
+        var[c] = vv;
+    }
+}
+
+__global__ void bn_fwd_kernel(const float* __restrict__ x, const float* __restrict__ weight,
+                              const float* __restrict__ bias, const float* __restrict__ mean,
+                              const float* __restrict__ invstd, float* __restrict__ y, int N, int C, int H, int W) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * H * W;
+    if (i >= total) return;
+    int HW = H * W;
+    int tmp = i / HW;
+    int c = tmp % C;
+    float xv = x[i];
+    float xhat = (xv - mean[c]) * invstd[c];
+    y[i] = xhat * weight[c] + bias[c];
+}
+
+__global__ void bn_dbeta_dgamma_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
+                                       const float* __restrict__ mean, const float* __restrict__ invstd,
+                                       float* __restrict__ dweight, float* __restrict__ dbias, int N, int C, int H,
+                                       int W) {
+    int c = blockIdx.x;
+    if (c >= C) return;
+    int HW = H * W;
+    int M = N * HW;
+
+    float sum_db = 0.0f;
+    float sum_dg = 0.0f;
+    for (int i = threadIdx.x; i < M; i += blockDim.x) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        int off = ((n * C + c) * HW) + hw;
+        float go = grad_out[off];
+        float xhat = (x[off] - mean[c]) * invstd[c];
+        sum_db += go;
+        sum_dg += go * xhat;
+    }
+
+    __shared__ float shared_db[32];
+    __shared__ float shared_dg[32];
+    float db = blockReduceSum(sum_db, shared_db);
+    float dg = blockReduceSum(sum_dg, shared_dg);
+    if (threadIdx.x == 0) {
+        dbias[c] = db;
+        dweight[c] = dg;
+    }
+}
+
+__global__ void bn_bwd_dx_kernel(const float* __restrict__ grad_out, const float* __restrict__ x,
+                                 const float* __restrict__ weight, const float* __restrict__ mean,
+                                 const float* __restrict__ invstd, const float* __restrict__ dweight,
+                                 const float* __restrict__ dbias, float* __restrict__ grad_x, int N, int C, int H,
+                                 int W) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * C * H * W;
+    if (i >= total) return;
+    int HW = H * W;
+    int tmp = i / HW;
+    int c = tmp % C;
+    int M = N * HW;
+    float go = grad_out[i];
+    float xhat = (x[i] - mean[c]) * invstd[c];
+    float dx = ((float)M * go - dbias[c] - xhat * dweight[c]) * (weight[c] * invstd[c]) / (float)M;
+    grad_x[i] = dx;
+}
+
+__global__ void bn_invstd_kernel(const float* __restrict__ var, float* __restrict__ invstd, int C, float eps) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= C) return;
+    invstd[i] = rsqrtf(var[i] + eps);
+}
+
+__global__ void bn_running_update_kernel(float* __restrict__ running_mean, float* __restrict__ running_var,
+                                        const float* __restrict__ mean, const float* __restrict__ var, int C,
+                                        float momentum) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= C) return;
+    float m = mean[i];
+    float v = var[i];
+    running_mean[i] = (1.0f - momentum) * running_mean[i] + momentum * m;
+    running_var[i] = (1.0f - momentum) * running_var[i] + momentum * v;
+}
+
 __global__ void cross_entropy_fwd_kernel(const float* __restrict__ logits, const int64_t* __restrict__ targets,
                                          float* __restrict__ probs, float* __restrict__ loss, int N, int C) {
     __shared__ float shared[32];  // warp partial sums
@@ -775,6 +885,7 @@ torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
                                                                      b.has_value(), oc_tiles);
         }
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
 }
 
@@ -857,6 +968,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> conv2d_backward(
         conv2d_bwd_bias_kernel<THREADS><<<Cout, THREADS, 0, stream>>>(grad_out.data_ptr<float>(),
                                                                       grad_b.data_ptr<float>(), N, Cout, Hout, Wout);
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {grad_x, grad_w, grad_b};
 }
 
@@ -882,6 +994,7 @@ torch::Tensor relu_forward(torch::Tensor x) {
         int blocks = (n + threads - 1) / threads;
         relu_fwd_kernel<<<blocks, threads, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(), n);
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
 }
 
@@ -914,6 +1027,7 @@ torch::Tensor relu_backward(torch::Tensor grad_out, torch::Tensor x) {
         relu_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
                                                        grad_x.data_ptr<float>(), n);
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_x;
 }
 
@@ -966,6 +1080,7 @@ std::tuple<torch::Tensor, torch::Tensor> maxpool2d_forward(torch::Tensor x, int6
                                                                        Wout, (int)kernel, (int)stride, c_tiles);
         }
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {y, idx};
 }
 
@@ -1017,6 +1132,7 @@ torch::Tensor maxpool2d_backward(torch::Tensor grad_out, torch::Tensor indices, 
                 (int)in_w, Hout, Wout, c_tiles);
         }
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_x;
 }
 
@@ -1033,6 +1149,7 @@ torch::Tensor global_avg_pool2d_forward(torch::Tensor x) {
     dim3 block(threads, 1, 1);
     dim3 grid((C + threads - 1) / threads, N, 1);
     global_avg_pool_fwd_kernel<<<grid, block, 0, stream>>>(x.data_ptr<float>(), y.data_ptr<float>(), N, C, H, W);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
 }
 
@@ -1048,6 +1165,7 @@ torch::Tensor global_avg_pool2d_backward(torch::Tensor grad_out, int64_t h, int6
     int blocks = (total + threads - 1) / threads;
     global_avg_pool_bwd_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), grad_x.data_ptr<float>(),
                                                               N, C, (int)h, (int)w);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return grad_x;
 }
 
@@ -1071,6 +1189,7 @@ torch::Tensor linear_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
     linear_fwd_tiled_kernel<TILE><<<grid, block, 0, stream>>>(x.data_ptr<float>(), w.data_ptr<float>(),
                                                              b.has_value() ? b->data_ptr<float>() : nullptr,
                                                              y.data_ptr<float>(), N, In, Out, b.has_value());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return y;
 }
 
@@ -1113,6 +1232,115 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> linear_backward(
         linear_bwd_bias_kernel<RTHREADS><<<Out, RTHREADS, 0, stream>>>(grad_out.data_ptr<float>(),
                                                                        grad_b.data_ptr<float>(), N, Out);
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {grad_x, grad_w, grad_b};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_forward(torch::Tensor x, torch::Tensor weight,
+                                                                            torch::Tensor bias, torch::Tensor running_mean,
+                                                                            torch::Tensor running_var, bool training,
+                                                                            double momentum, double eps) {
+    check_float_cuda(x, "x");
+    check_float_cuda(weight, "weight");
+    check_float_cuda(bias, "bias");
+    check_float_cuda(running_mean, "running_mean");
+    check_float_cuda(running_var, "running_var");
+    TORCH_CHECK(x.dim() == 4, "x must be 4D (N, C, H, W)");
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+    TORCH_CHECK(weight.numel() == C && bias.numel() == C, "weight/bias must have shape (C)");
+    TORCH_CHECK(running_mean.numel() == C && running_var.numel() == C, "running stats must have shape (C)");
+
+    auto y = torch::empty_like(x);
+    torch::Tensor mean = training ? torch::empty({C}, x.options()) : running_mean;
+    auto invstd = torch::empty({C}, x.options());
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+
+    if (training) {
+        auto var = torch::empty({C}, x.options());
+        int threads = 256;
+        bn_stats_kernel<<<C, threads, 0, stream>>>(x.data_ptr<float>(), mean.data_ptr<float>(), var.data_ptr<float>(),
+                                                   N, C, H, W);
+        int blocks = (C + threads - 1) / threads;
+        // invstd = rsqrt(var + eps)
+        // reuse scale_kernel (x[i] *= s) style would not fit; do a tiny kernel inline by using scale + add isn't available.
+        // Here compute invstd with a simple elementwise kernel via ATen? Not allowed. Implement a custom kernel below.
+        // For simplicity: launch bn_fwd_kernel expects invstd; compute invstd in a small CUDA kernel here.
+        // We use a lambda-free kernel by reusing global_avg_pool_bwd style isn't possible; define below.
+        // (Implemented as bn_invstd_kernel.)
+        // NOLINTNEXTLINE(bugprone-use-after-move)
+        bn_invstd_kernel<<<blocks, threads, 0, stream>>>(var.data_ptr<float>(), invstd.data_ptr<float>(), C, (float)eps);
+
+        // Update running stats (in-place)
+        bn_running_update_kernel<<<blocks, threads, 0, stream>>>(running_mean.data_ptr<float>(),
+                                                                 running_var.data_ptr<float>(), mean.data_ptr<float>(),
+                                                                 var.data_ptr<float>(), C, (float)momentum);
+    } else {
+        int threads = 256;
+        int blocks = (C + threads - 1) / threads;
+        bn_invstd_kernel<<<blocks, threads, 0, stream>>>(running_var.data_ptr<float>(), invstd.data_ptr<float>(), C,
+                                                         (float)eps);
+    }
+
+    int total = N * C * H * W;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    bn_fwd_kernel<<<blocks, threads, 0, stream>>>(x.data_ptr<float>(), weight.data_ptr<float>(), bias.data_ptr<float>(),
+                                                  mean.data_ptr<float>(), invstd.data_ptr<float>(), y.data_ptr<float>(),
+                                                  N, C, H, W);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {y, mean, invstd};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_backward(torch::Tensor grad_out, torch::Tensor x,
+                                                                             torch::Tensor weight, torch::Tensor saved_mean,
+                                                                             torch::Tensor saved_invstd, bool need_grad_x,
+                                                                             bool need_grad_w, bool need_grad_b) {
+    check_float_cuda(grad_out, "grad_out");
+    check_float_cuda(x, "x");
+    check_float_cuda(weight, "weight");
+    check_float_cuda(saved_mean, "saved_mean");
+    check_float_cuda(saved_invstd, "saved_invstd");
+    TORCH_CHECK(x.dim() == 4, "x must be 4D (N, C, H, W)");
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+
+    auto grad_x = need_grad_x ? torch::empty_like(x) : torch::empty({0}, x.options());
+    auto grad_w = need_grad_w ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
+    auto grad_b = need_grad_b ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
+
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+
+    int threads = 256;
+    torch::Tensor tmp_dw;
+    torch::Tensor tmp_db;
+    if (need_grad_w || need_grad_b || need_grad_x) {
+        // For dx we need dgamma and dbeta; if caller doesn't request them but dx does, compute into temporaries.
+        tmp_dw = need_grad_w ? grad_w : torch::empty({C}, x.options());
+        tmp_db = need_grad_b ? grad_b : torch::empty({C}, x.options());
+
+        bn_dbeta_dgamma_kernel<<<C, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
+                                                          saved_mean.data_ptr<float>(), saved_invstd.data_ptr<float>(),
+                                                          tmp_dw.data_ptr<float>(), tmp_db.data_ptr<float>(), N, C, H, W);
+    }
+
+    if (need_grad_x) {
+        int total = N * C * H * W;
+        TORCH_CHECK(tmp_dw.numel() == C && tmp_db.numel() == C, "batchnorm2d_backward internal error: missing stats");
+        int blocks = (total + threads - 1) / threads;
+        bn_bwd_dx_kernel<<<blocks, threads, 0, stream>>>(grad_out.data_ptr<float>(), x.data_ptr<float>(),
+                                                         weight.data_ptr<float>(), saved_mean.data_ptr<float>(),
+                                                         saved_invstd.data_ptr<float>(), tmp_dw.data_ptr<float>(),
+                                                         tmp_db.data_ptr<float>(), grad_x.data_ptr<float>(), N, C, H, W);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {grad_x, grad_w, grad_b};
 }
 

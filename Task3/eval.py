@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 
 try:
-    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
+    from Task3.minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
     from Task3.minifw.tensor import Tensor
 except ModuleNotFoundError:  # supports: cd Task3 && python eval.py
-    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGGNet
+    from minifw.nn import DLALikeCifarNet, SimpleCifarNet, VGG
     from minifw.tensor import Tensor
 
 
@@ -115,7 +115,7 @@ def main() -> None:
     elif arch == "simple":
         model = SimpleCifarNet(device=device)
     elif arch == "vgg16":
-        model = VGGNet("VGG16", device=device)
+        model = VGG("VGG16", device=device)
     else:
         raise ValueError(f"Unknown checkpoint arch: {arch}")
     state = ckpt.get("net", {})
