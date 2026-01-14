@@ -35,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--log-every", type=int, default=50, help="update progress bar every N steps (reduces CPU overhead)")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
     p.add_argument(
@@ -73,6 +74,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Path to save loss curve image (default: Task3/outputs/loss_curve.png when --save-loss-plot is enabled).",
+    )
+    p.add_argument(
+        "--loss-log-every",
+        type=int,
+        default=10,
+        help="record loss every N steps for CSV/plot (reduces overhead; default: 10)",
     )
     return p.parse_args()
 
@@ -132,19 +139,16 @@ def write_loss_csv(rows: list[dict[str, Any]], path: Path) -> None:
             writer.writerow({k: row[k] for k in fieldnames})
 
 
-def maybe_save_loss_plot(rows: list[dict[str, Any]], path: Path) -> None:
+def maybe_save_loss_plot(steps: list[int], losses: list[float], path: Path) -> None:
     try:
         import matplotlib.pyplot as plt  # type: ignore
     except ImportError:
         print("matplotlib not installed; skipping loss curve plot. Install via: pip install matplotlib")
         return
 
-    if not rows:
+    if not steps or not losses:
         print("No loss rows to plot; skipping.")
         return
-
-    steps = [int(r["global_step"]) for r in rows]
-    losses = [float(r["loss"]) for r in rows]
 
     ema_losses: list[float] = []
     alpha = 0.05
@@ -298,8 +302,17 @@ def main() -> None:
             p.data.copy_(ema_backup[name])
 
     record_loss = (loss_csv_path is not None) or (loss_plot_path is not None)
-    loss_rows: list[dict[str, Any]] = [] if record_loss else []
-    global_step = int(start_epoch) * len(trainloader) if record_loss else 0
+    log_every = max(1, int(args.log_every))
+    loss_log_every = max(1, int(args.loss_log_every))
+    global_step = int(start_epoch) * len(trainloader)
+
+    loss_steps: list[int] = []
+    loss_values: torch.Tensor | None = None
+    loss_write_idx = 0
+    if record_loss:
+        total_steps = (int(args.epochs) - int(start_epoch)) * len(trainloader)
+        max_records = (total_steps + loss_log_every - 1) // loss_log_every
+        loss_values = torch.empty((max_records,), device=device, dtype=torch.float32)
 
     for epoch in range(start_epoch, int(args.epochs)):
         print("\nEpoch: %d" % epoch, flush=True)
@@ -307,8 +320,8 @@ def main() -> None:
         optimizer.lr = scheduled_lr(args, epoch)
 
         net.train()
-        train_loss = 0.0
-        correct = 0
+        train_loss_sum = torch.zeros((), device=device, dtype=torch.float32)
+        correct_sum = torch.zeros((), device=device, dtype=torch.int64)
         total = 0
         for batch_idx, (inputs, targets) in enumerate(trainloader):
             inputs = inputs.to(device, non_blocking=True).contiguous()
@@ -321,26 +334,27 @@ def main() -> None:
             ema_update()
             optimizer.zero_grad()
 
-            loss_value = float(loss.data.item())
-            train_loss += loss_value
-            if record_loss:
-                loss_rows.append(
-                    {
-                        "global_step": global_step,
-                        "epoch": int(epoch),
-                        "batch_idx": int(batch_idx),
-                        "loss": loss_value,
-                    }
-                )
-                global_step += 1
+            train_loss_sum.add_(loss.data.detach())
             _, predicted = logits.data.max(1)
             total += int(targets.size(0))
-            correct += int(predicted.eq(targets).sum().item())
-            progress_bar(
-                batch_idx,
-                len(trainloader),
-                "Loss: %.3f | Acc: %.3f%% (%d/%d) | LR: %.4g" % (train_loss / (batch_idx + 1), 100.0 * correct / max(1, total), correct, total, optimizer.lr),
-            )
+            correct_sum.add_(predicted.eq(targets).sum())
+
+            if record_loss and (global_step % loss_log_every == 0) and loss_values is not None:
+                if loss_write_idx < int(loss_values.numel()):
+                    loss_values[loss_write_idx] = loss.data.detach()
+                    loss_steps.append(int(global_step))
+                    loss_write_idx += 1
+            global_step += 1
+
+            if (batch_idx % log_every == 0) or (batch_idx == len(trainloader) - 1):
+                avg_loss = float((train_loss_sum / float(batch_idx + 1)).item())
+                acc = float((correct_sum.float() * (100.0 / float(max(1, total)))).item())
+                progress_bar(
+                    batch_idx,
+                    len(trainloader),
+                    "Loss: %.3f | Acc: %.3f%% (%d/%d) | LR: %.4g"
+                    % (avg_loss, acc, int(correct_sum.item()), total, optimizer.lr),
+                )
 
         print("\n==> Testing..", flush=True)
         if ema is not None:
@@ -362,11 +376,23 @@ def main() -> None:
             best_acc = acc
 
     if record_loss:
+        losses: list[float] = []
+        if loss_values is not None and loss_write_idx > 0:
+            losses = loss_values[:loss_write_idx].detach().cpu().tolist()
         if loss_csv_path is not None:
-            write_loss_csv(loss_rows, loss_csv_path)
+            rows = [
+                {
+                    "global_step": int(s),
+                    "epoch": int(s // len(trainloader)),
+                    "batch_idx": int(s % len(trainloader)),
+                    "loss": float(l),
+                }
+                for s, l in zip(loss_steps, losses)
+            ]
+            write_loss_csv(rows, loss_csv_path)
             print(f"Saved loss CSV to: {loss_csv_path}", flush=True)
         if loss_plot_path is not None:
-            maybe_save_loss_plot(loss_rows, loss_plot_path)
+            maybe_save_loss_plot(loss_steps, losses, loss_plot_path)
             if loss_plot_path.exists():
                 print(f"Saved loss curve to: {loss_plot_path}", flush=True)
 
