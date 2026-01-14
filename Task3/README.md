@@ -40,8 +40,13 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 多卡（DDP / torchrun），`--batch-size` 为 **单卡** batch：
 
 ```bash
-torchrun --standalone --nproc_per_node=2 Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
+torchrun --standalone --nproc_per_node=2 Task3/train.py
 ```
+
+说明：
+
+- 默认会从训练集切 `10%` 做验证（`--val-split 0.1`），并默认启用余弦退火学习率（`--scheduler cosine`）。
+- 如需关闭验证或学习率策略可显式传 `--no-eval` / `--scheduler none`。
 
 指定卡数量/指定哪些卡：
 

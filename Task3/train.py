@@ -27,7 +27,7 @@ except ModuleNotFoundError:  # supports: cd Task3 && python train.py
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Task3: Custom CUDA framework CIFAR-10 training (single GPU or DDP).")
     p.add_argument("--data-dir", type=str, default="")
-    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--epochs", type=int, default=300)
     p.add_argument("--batch-size", type=int, default=256, help="Per-GPU batch size.")
     p.add_argument("--lr", type=float, default=0.1)
     p.add_argument("--scheduler", type=str, default="cosine", choices=["none", "step", "cosine"])
