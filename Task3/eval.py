@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True, help="use EMA weights if present in checkpoint")
     p.add_argument("--backend", type=str, default="", help="DDP backend override (default: nccl).")
     return p.parse_args()
 
@@ -119,6 +120,10 @@ def main() -> None:
     else:
         raise ValueError(f"Unknown checkpoint arch: {arch}")
     state = ckpt.get("net", {})
+    if bool(args.use_ema):
+        ema_state = ckpt.get("ema", None)
+        if isinstance(ema_state, dict) and len(ema_state) > 0:
+            state = ema_state
     for name, p in model.named_parameters().items():
         if name not in state:
             raise KeyError(f"Missing parameter in checkpoint: {name}")

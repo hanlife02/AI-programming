@@ -50,6 +50,10 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 - `--data-dir`: CIFAR-10 下载/缓存目录（默认 `Task3/data`）
 - `--ckpt`: checkpoint 路径（默认 `Task3/checkpoint/ckpt.pth`）
 - `--no-augment`: 关闭数据增强（更快但通常准确率更低）
+- `--wd-mode weights`: 仅对权重（ndim>=2）做 weight decay（更常见、更容易提升验证集 acc）；`--wd-mode all` 为旧行为（所有参数都 decay）
+- `--warmup-epochs`: 学习率线性 warmup（默认 5），通常能让训练更稳定
+- `--autoaugment/--random-erasing`: 更强的数据增强（通常能提高验证集 acc，但训练更慢）
+- `--ema`: 启用参数 EMA（通常能提高验证集 acc；`eval.py` 会默认优先用 EMA 权重）
 - `-r/--resume`: 从 `--ckpt` 恢复训练（会校验模型结构 `arch` 是否一致）
 
 ## 3) 说明
@@ -62,3 +66,5 @@ python Task3/train.py --epochs 50 --batch-size 256 --num-workers 8 --lr 0.1
 ```bash
 python Task3/eval.py --ckpt Task3/checkpoint/ckpt.pth
 ```
+
+如 checkpoint 中包含 EMA 权重，`eval.py` 默认会使用 EMA（可用 `--no-use-ema` 关闭）。
