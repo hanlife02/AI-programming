@@ -152,21 +152,43 @@ def main() -> None:
     torch.set_grad_enabled(False)
     correct = 0
     total = 0
+    class_names = list(getattr(ds, "classes", []))
+    if len(class_names) == 0:
+        num_classes = 10
+        class_names = [str(i) for i in range(num_classes)]
+    else:
+        num_classes = len(class_names)
+    correct_per_class = torch.zeros(num_classes, device=device, dtype=torch.int64)
+    total_per_class = torch.zeros(num_classes, device=device, dtype=torch.int64)
     for images, labels in loader:
         images = images.to(device, non_blocking=True).contiguous()
         labels = labels.to(device, non_blocking=True)
         logits = model(Tensor(images, requires_grad=False)).data
-        correct += correct_count(logits, labels)
+        preds = logits.argmax(dim=1)
+        correct_mask = preds == labels
+        correct += int(correct_mask.sum().item())
         total += int(images.size(0))
+        total_per_class += torch.bincount(labels, minlength=num_classes)
+        if correct_mask.any():
+            correct_per_class += torch.bincount(labels[correct_mask], minlength=num_classes)
 
     if info.enabled:
         t = torch.tensor([correct, total], device=device, dtype=torch.int64)
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         correct_g, total_g = int(t[0].item()), int(t[1].item())
+        dist.all_reduce(correct_per_class, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_per_class, op=dist.ReduceOp.SUM)
     else:
         correct_g, total_g = correct, total
 
     rank0_print(info, f"ckpt: {ckpt_path} | test acc: {(correct_g / max(1, total_g)):.4f}")
+    if info.rank == 0:
+        correct_list = correct_per_class.cpu().tolist()
+        total_list = total_per_class.cpu().tolist()
+        rank0_print(info, "per-class acc:")
+        for idx, name in enumerate(class_names):
+            acc = (correct_list[idx] / max(1, total_list[idx])) if idx < len(total_list) else 0.0
+            rank0_print(info, f"  {idx:02d}-{name}: {acc:.4f}")
     cleanup_dist(info)
 
 
