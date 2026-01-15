@@ -8,16 +8,16 @@ import torch
 
 def _load_ext():
     try:
-        import task3_ops  # type: ignore
-    except ModuleNotFoundError as e:  # pragma: no cover
+        import task3_ops
+    except ModuleNotFoundError as e:
         import sys
         from pathlib import Path
 
         task3_dir = Path(__file__).resolve().parents[1]
         sys.path.insert(0, str(task3_dir))
         try:
-            import task3_ops  # type: ignore
-        except ModuleNotFoundError as e2:  # pragma: no cover
+            import task3_ops
+        except ModuleNotFoundError as e2:
             raise ModuleNotFoundError(
                 "task3_ops extension not built. Build it with:\n"
                 "  cd Task3 && python setup.py build_ext --inplace"

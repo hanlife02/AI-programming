@@ -1,9 +1,3 @@
-"""Task3 helpers.
-
-This file intentionally mirrors the classic CIFAR-10 PyTorch tutorial utilities:
-- `progress_bar`: lightweight batch progress display
-"""
-
 from __future__ import annotations
 
 import shutil

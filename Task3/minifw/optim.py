@@ -9,14 +9,6 @@ from .tensor import Tensor
 
 
 class SGD:
-    """SGD optimizer backed by the custom CUDA sgd_update_ op.
-
-    Supports either:
-    - `SGD(params: Sequence[Tensor], lr=..., momentum=..., weight_decay=...)`
-    - `SGD(params: Sequence[dict], lr=..., momentum=..., weight_decay=...)` where each dict contains:
-        - "params": Sequence[Tensor] (required)
-        - "lr" / "momentum" / "weight_decay" (optional overrides)
-    """
 
     def __init__(
         self,

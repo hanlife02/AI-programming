@@ -11,7 +11,7 @@ import torch.distributed as dist
 try:
     from Task3.minifw.nn import MyNet
     from Task3.minifw.tensor import Tensor
-except ModuleNotFoundError:  # supports: cd Task3 && python eval.py
+except ModuleNotFoundError:
     from minifw.nn import MyNet
     from minifw.tensor import Tensor
 
@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
 def build_test_transform():
     try:
         import torchvision.transforms as transforms
-    except ModuleNotFoundError as e:  # pragma: no cover
+    except ModuleNotFoundError as e:
         raise ModuleNotFoundError("Task3 evaluation requires torchvision. Install it with: pip install torchvision") from e
 
     mean = (0.4914, 0.4822, 0.4465)
@@ -95,7 +95,7 @@ def main() -> None:
     args = parse_args()
     try:
         import torchvision
-    except ModuleNotFoundError as e:  # pragma: no cover
+    except ModuleNotFoundError as e: 
         raise ModuleNotFoundError("Task3 evaluation requires torchvision. Install it with: pip install torchvision") from e
     info = get_dist_info()
     setup_dist(args, info)

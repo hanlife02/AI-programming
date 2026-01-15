@@ -1,11 +1,3 @@
-"""Train CIFAR-10 with the custom CUDA framework (Task3).
-
-This file follows the same training loop style as the provided PyTorch reference:
-- progress bar per batch
-- optional resume from checkpoint
-- cosine LR scheduler (optional)
-"""
-
 from __future__ import annotations
 
 import argparse

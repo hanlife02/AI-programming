@@ -185,12 +185,6 @@ class VGGNet(Module):
 
 
 class MyNet(Module):
-    """A VGG-style CIFAR-10 network (Conv+BN+ReLU blocks + MaxPool, then Linear head).
-
-    This is the only model kept for Task3 (previous DLA-like and simple CNN baselines removed).
-    - features: Conv2d -> BatchNorm2d -> ReLU, and MaxPool2d for 'M'
-    - head: flatten -> Linear(512 -> num_classes)
-    """
 
     def __init__(self, vgg_name: str = "VGG16", num_classes: int = 10, device: torch.device | None = None) -> None:
         device = device or torch.device("cuda")
