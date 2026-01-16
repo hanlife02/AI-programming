@@ -12,6 +12,9 @@ python setup.py build_ext --inplace
 ## 2) Dataset Layout
 
 Point `--data-dir` to the Tiny ImageNet root (e.g. `tiny-imagenet-200`). The scripts do not auto-download by default (default data dir: `Tiny-imagenet/data`):
+```shell
+./Tiny-imagenet/hfd.sh zh-plus/tiny-imagenet --dataset --include "*.parquet" --local-dir Tiny-imagenet/data -x 10
+```
 
 ```
 tiny-imagenet-200/
