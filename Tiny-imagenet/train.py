@@ -350,7 +350,7 @@ def main() -> None:
         best_acc = float(ckpt.get("acc", 0.0))
         start_epoch = int(ckpt.get("epoch", 0)) + 1
 
-    optimizer = SGD(net.parameters(), lr=float(args.lr), momentum=float(args.momentum), weight_decay=float(args.weight_decay))
+    optimizer = SGD(list(net.parameters()), lr=float(args.lr), momentum=float(args.momentum), weight_decay=float(args.weight_decay))
     log_every = max(1, int(args.log_every))
 
     for epoch in range(start_epoch, int(args.epochs)):
