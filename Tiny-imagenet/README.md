@@ -19,6 +19,8 @@ python setup.py build_ext --inplace
 
 如遇到 GPU 架构相关报错，可参考 `Task3/README.md` 中的 `TASK3_CUDA_ARCH_LIST` 说明。
 
+自动下载依赖 `kagglehub`，并需要配置 Kaggle 凭证（`~/.kaggle/kaggle.json`）。
+
 ## 2) 训练
 
 默认数据路径（与需求一致）：

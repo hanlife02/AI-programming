@@ -284,7 +284,14 @@ def _ensure_dataset(
     val_dir = dataset_root / "val"
     _prepare_val_imagefolder(val_dir)
     if check_integrity and not _dataset_is_complete(train_dir, val_dir, num_classes):
-        raise RuntimeError("downloaded dataset is incomplete; please retry download")
+        print("==> Dataset incomplete after download; retrying..", flush=True)
+        shutil.rmtree(dataset_root, ignore_errors=True)
+        dataset_root = _download_tiny_imagenet(dataset_id)
+        train_dir = dataset_root / "train"
+        val_dir = dataset_root / "val"
+        _prepare_val_imagefolder(val_dir)
+        if not _dataset_is_complete(train_dir, val_dir, num_classes):
+            raise RuntimeError("downloaded dataset is incomplete after retry; please retry manually")
     return train_dir, val_dir
 
 
