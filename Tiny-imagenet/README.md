@@ -30,7 +30,7 @@ The loader uses `wnids.txt` (if present) to keep class order consistent.
 ## 3) Train
 
 ```bash
-python Tiny-imagenet/train.py --data-dir /path/to/tiny-imagenet-200 --epochs 90 --batch-size 256 --num-workers 8
+python Tiny-imagenet/train.py
 ```
 
 Common knobs:
@@ -39,6 +39,7 @@ Common knobs:
 - `--image-size` (default 64)
 - `--autoaugment`, `--random-erasing`
 - `--ema`
+- `--micro-batch-size` to split large batches if you hit CUDA OOM
 
 ## 4) Evaluate
 

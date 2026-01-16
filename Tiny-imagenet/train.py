@@ -30,9 +30,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--image-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=0.1, help="learning rate")
-    p.add_argument("--epochs", type=int, default=90)
+    p.add_argument("--epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument(
+        "--micro-batch-size",
+        type=int,
+        default=0,
+        help="Split each batch into smaller micro-batches to reduce memory (0 disables).",
+    )
+    p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--log-every", type=int, default=1, help="update progress bar every N steps (reduces CPU overhead)")
     p.add_argument("--momentum", type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
@@ -54,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-lr", type=float, default=0.0, help="minimum lr for cosine schedule")
     p.add_argument("--ema", action=argparse.BooleanOptionalAction, default=False, help="enable EMA of model parameters")
     p.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (if --ema)")
-    p.add_argument("--data-dir", type=str, default="")
+    p.add_argument("--data-dir", type=str, default="/path/to/tiny-imagenet-200")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument(
         "--loss-csv",
@@ -347,25 +353,58 @@ def main() -> None:
         train_loss_sum = torch.zeros((), device=device, dtype=torch.float32)
         correct_sum = torch.zeros((), device=device, dtype=torch.int64)
         total = 0
+        micro_batch_size = max(0, int(args.micro_batch_size))
         for batch_idx, (inputs, targets) in enumerate(trainloader):
-            inputs = inputs.to(device, non_blocking=True).contiguous()
-            targets = targets.to(device, non_blocking=True)
+            batch_size = int(targets.size(0))
+            micro_batch = micro_batch_size if micro_batch_size > 0 else batch_size
+            micro_batch = min(micro_batch, batch_size)
 
-            logits = net(Tensor(inputs, requires_grad=False))
-            loss = logits.cross_entropy(targets)
-            loss.backward()
-            optimizer.step()
-            ema_update()
-            optimizer.zero_grad()
+            if micro_batch == batch_size:
+                inputs = inputs.to(device, non_blocking=True).contiguous()
+                targets = targets.to(device, non_blocking=True)
 
-            train_loss_sum.add_(loss.data.detach())
-            _, predicted = logits.data.max(1)
-            total += int(targets.size(0))
-            correct_sum.add_(predicted.eq(targets).sum())
+                logits = net(Tensor(inputs, requires_grad=False))
+                loss = logits.cross_entropy(targets)
+                loss.backward()
+                optimizer.step()
+                ema_update()
+                optimizer.zero_grad()
+
+                batch_loss = loss.data.detach()
+                _, predicted = logits.data.max(1)
+                total += int(targets.size(0))
+                correct_sum.add_(predicted.eq(targets).sum())
+            else:
+                batch_loss = torch.zeros((), device=device, dtype=torch.float32)
+                optimizer.zero_grad()
+                for start in range(0, batch_size, micro_batch):
+                    end = min(start + micro_batch, batch_size)
+                    micro_inputs = inputs[start:end].to(device, non_blocking=True).contiguous()
+                    micro_targets = targets[start:end].to(device, non_blocking=True)
+
+                    logits = net(Tensor(micro_inputs, requires_grad=False))
+                    loss = logits.cross_entropy(micro_targets)
+                    scale = float(end - start) / float(batch_size)
+                    if scale != 1.0:
+                        scaled_loss = loss * scale
+                        scaled_loss.backward()
+                    else:
+                        loss.backward()
+
+                    batch_loss.add_(loss.data.detach() * scale)
+                    _, predicted = logits.data.max(1)
+                    total += int(micro_targets.size(0))
+                    correct_sum.add_(predicted.eq(micro_targets).sum())
+
+                optimizer.step()
+                ema_update()
+                optimizer.zero_grad()
+
+            train_loss_sum.add_(batch_loss)
 
             if record_loss and (global_step % loss_log_every == 0) and loss_values is not None:
                 if loss_write_idx < int(loss_values.numel()):
-                    loss_values[loss_write_idx] = loss.data.detach()
+                    loss_values[loss_write_idx] = batch_loss
                     loss_steps.append(int(global_step))
                     loss_write_idx += 1
             global_step += 1
