@@ -34,16 +34,15 @@ Parquet alternative: if `--data-dir` contains parquet files (e.g. Hugging Face d
 
 ## 3) Train
 
+Download:
 ```bash
-python Tiny-imagenet/train.py
+python Tiny-imagenet/train.py --data-dir Tiny-imagenet/data --download
 ```
 
-Common knobs:
-
-- `--image-size` (default 64)
-- `--autoaugment`, `--random-erasing`
-- `--ema`
-- `--micro-batch-size` to split large batches if you hit CUDA OOM
+Train:
+```bash
+python Tiny-imagenet/train.py --data-dir Tiny-imagenet/data
+```
 
 ## 4) Evaluate
 
