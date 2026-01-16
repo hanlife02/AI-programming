@@ -11,7 +11,7 @@ python setup.py build_ext --inplace
 
 ## 2) Dataset Layout
 
-Point `--data-dir` to the Tiny ImageNet root (e.g. `tiny-imagenet-200`). The scripts do not auto-download by default:
+Point `--data-dir` to the Tiny ImageNet root (e.g. `tiny-imagenet-200`). The scripts do not auto-download by default (default data dir: `Tiny-imagenet/data`):
 
 ```
 tiny-imagenet-200/
@@ -26,6 +26,8 @@ tiny-imagenet-200/
 ```
 
 The loader uses `wnids.txt` (if present) to keep class order consistent.
+
+Parquet alternative: if `--data-dir` contains parquet files (e.g. Hugging Face datasets), the loader will use them instead of image folders. Filenames must include `train` and `val` (or `validation`) to identify splits, and you need `datasets` installed.
 
 ## 3) Train
 

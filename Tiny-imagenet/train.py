@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-lr", type=float, default=0.0, help="minimum lr for cosine schedule")
     p.add_argument("--ema", action=argparse.BooleanOptionalAction, default=False, help="enable EMA of model parameters")
     p.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (if --ema)")
-    p.add_argument("--data-dir", type=str, default="/openbayes/home/AI-programming/tiny-imagenet/data")
+    p.add_argument("--data-dir", type=str, default="")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument(
         "--loss-csv",
