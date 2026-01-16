@@ -21,13 +21,13 @@ from tiny_imagenet import TinyImageNet, ensure_tiny_imagenet
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny ImageNet evaluation (single GPU).")
-    p.add_argument("--data-dir", type=str, default="")
+    p.add_argument("--data-dir", type=str, default="/openbayes/home/AI-programming/tiny-imagenet/data")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True, help="use EMA weights if present in checkpoint")
     p.add_argument("--image-size", type=int, default=0, help="override image size for eval (default: from ckpt or 64)")
-    p.add_argument("--download", action=argparse.BooleanOptionalAction, default=True, help="auto-download Tiny ImageNet if missing")
+    p.add_argument("--download", action=argparse.BooleanOptionalAction, default=False, help="download Tiny ImageNet if missing")
     return p.parse_args()
 
 

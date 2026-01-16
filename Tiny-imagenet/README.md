@@ -11,7 +11,7 @@ python setup.py build_ext --inplace
 
 ## 2) Dataset Layout
 
-Point `--data-dir` to the Tiny ImageNet root (e.g. `tiny-imagenet-200`). If missing, the scripts will auto-download to the `--data-dir` folder (default: `Tiny-imagenet/data`):
+Point `--data-dir` to the Tiny ImageNet root (e.g. `tiny-imagenet-200`). The scripts do not auto-download by default:
 
 ```
 tiny-imagenet-200/
@@ -35,7 +35,6 @@ python Tiny-imagenet/train.py
 
 Common knobs:
 
-- `--arch` VGG variant (VGG11/13/16/19)
 - `--image-size` (default 64)
 - `--autoaugment`, `--random-erasing`
 - `--ema`

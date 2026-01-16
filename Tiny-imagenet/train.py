@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--autoaugment", action=argparse.BooleanOptionalAction, default=False, help="use torchvision AutoAugment(ImageNet)")
     p.add_argument("--random-erasing", type=float, default=0.0, help="RandomErasing probability (e.g. 0.25)")
-    p.add_argument("--download", action=argparse.BooleanOptionalAction, default=True, help="auto-download Tiny ImageNet if missing")
+    p.add_argument("--download", action=argparse.BooleanOptionalAction, default=False, help="download Tiny ImageNet if missing")
     p.add_argument("--resume", "-r", action="store_true", help="resume from checkpoint")
     p.add_argument("--scheduler", type=str, default="cosine", choices=["none", "cosine"])
     p.add_argument("--t-max", type=int, default=200, help="T_max for cosine scheduler")
@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-lr", type=float, default=0.0, help="minimum lr for cosine schedule")
     p.add_argument("--ema", action=argparse.BooleanOptionalAction, default=False, help="enable EMA of model parameters")
     p.add_argument("--ema-decay", type=float, default=0.999, help="EMA decay (if --ema)")
-    p.add_argument("--data-dir", type=str, default="/path/to/tiny-imagenet-200")
+    p.add_argument("--data-dir", type=str, default="/openbayes/home/AI-programming/tiny-imagenet/data")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument(
         "--loss-csv",

@@ -35,3 +35,5 @@ report.pdf
 
 *.so
 build/
+
+tiny-imagenet/
