@@ -24,7 +24,7 @@ def main() -> None:
     csv_path = Path(args.csv).expanduser() if args.csv else (task_dir / "outputs" / "loss.csv")
     out_path = Path(args.out).expanduser() if args.out else (task_dir / "outputs" / "loss_curve.png")
 
-    import matplotlib.pyplot as plt  # type: ignore
+    import matplotlib.pyplot as plt 
 
     rows: list[dict[str, str]] = []
     with csv_path.open("r", newline="", encoding="utf-8") as f:
