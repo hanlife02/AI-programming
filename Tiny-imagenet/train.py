@@ -5,6 +5,8 @@ import math
 import os
 import shutil
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import torch
@@ -86,8 +88,15 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet training with Task3 CUDA ops")
     p.add_argument("--train-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/train")
     p.add_argument("--val-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/val")
-    p.add_argument("--dataset-id", type=str, default="akash2sharma/tiny-imagenet")
+    p.add_argument("--data-root", type=str, default="", help="root folder for auto-download (default: inferred)")
+    p.add_argument(
+        "--dataset-url",
+        type=str,
+        default="https://cs231n.stanford.edu/tiny-imagenet-200.zip",
+        help="Tiny-ImageNet zip URL for auto-download",
+    )
     p.add_argument("--download", action=argparse.BooleanOptionalAction, default=True, help="auto download if missing or incomplete")
+    p.add_argument("--force-download", action=argparse.BooleanOptionalAction, default=False, help="always download from dataset URL")
     p.add_argument("--check-integrity", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--model", type=str, default="VGG16", choices=sorted(_VGG_CFG.keys()))
@@ -163,32 +172,30 @@ def evaluate(net: Module, device: torch.device, loader: torch.utils.data.DataLoa
     return 100.0 * correct / max(1, total)
 
 
-def _find_dataset_root(base: Path) -> Path:
-    candidates = [base]
-    direct = base / "tiny-imagenet-200"
-    if direct.exists():
-        candidates.append(direct)
-    if base.exists():
-        for item in base.iterdir():
-            if item.is_dir():
-                candidates.append(item)
-    for cand in candidates:
-        if (cand / "train").is_dir() and (cand / "val").is_dir():
-            return cand
-    for train_dir in base.rglob("train"):
-        if train_dir.is_dir() and (train_dir.parent / "val").is_dir():
-            return train_dir.parent
-    raise FileNotFoundError(f"Cannot locate tiny-imagenet-200 under: {base}")
+def _infer_data_root(train_dir: Path, val_dir: Path, fallback: Path) -> Path:
+    if train_dir.name == "train" and train_dir.parent.name == "tiny-imagenet-200":
+        return train_dir.parent.parent
+    if val_dir.name == "val" and val_dir.parent.name == "tiny-imagenet-200":
+        return val_dir.parent.parent
+    return fallback
 
 
-def _download_tiny_imagenet(dataset_id: str) -> Path:
-    try:
-        import kagglehub
-    except ModuleNotFoundError as e:  # pragma: no cover
-        raise ModuleNotFoundError("Auto download requires kagglehub. Install it with: pip install kagglehub") from e
-    print(f"==> Downloading Tiny-ImageNet via kagglehub ({dataset_id}) ..", flush=True)
-    dataset_path = Path(kagglehub.dataset_download(dataset_id))
-    return _find_dataset_root(dataset_path)
+def _download_tiny_imagenet(data_root: Path, url: str) -> Path:
+    data_root.mkdir(parents=True, exist_ok=True)
+    dataset_root = data_root / "tiny-imagenet-200"
+
+    zip_path = data_root / "tiny-imagenet-200.zip"
+    if not zip_path.exists():
+        tmp_path = zip_path.with_suffix(".zip.part")
+        print(f"==> Downloading Tiny-ImageNet to {zip_path} ..", flush=True)
+        with urllib.request.urlopen(url) as resp, tmp_path.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+        tmp_path.replace(zip_path)
+
+    print(f"==> Extracting {zip_path} ..", flush=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(data_root)
+    return dataset_root
 
 
 def _val_is_imagefolder(val_dir: Path) -> bool:
@@ -264,14 +271,22 @@ def _dataset_is_complete(train_dir: Path, val_dir: Path, num_classes: int) -> bo
 def _ensure_dataset(
     train_dir: Path,
     val_dir: Path,
-    dataset_id: str,
+    data_root: Path | None,
+    url: str,
     download: bool,
+    force_download: bool,
     check_integrity: bool,
     num_classes: int,
+    fallback_root: Path,
 ) -> tuple[Path, Path]:
-    if train_dir.exists() and val_dir.exists():
+    if force_download:
+        if not download:
+            raise ValueError("force-download requires --download")
+        print("==> Force download enabled; ignoring local dataset..", flush=True)
+    elif train_dir.exists() and val_dir.exists():
         _prepare_val_imagefolder(val_dir)
         if not check_integrity or _dataset_is_complete(train_dir, val_dir, num_classes):
+            print(f"==> Found local dataset at {train_dir.parent}; skipping download.", flush=True)
             return train_dir, val_dir
         if not download:
             raise RuntimeError("dataset incomplete and auto-download disabled")
@@ -279,14 +294,18 @@ def _ensure_dataset(
     elif not download:
         raise FileNotFoundError(f"train/val dir not found: {train_dir} {val_dir}")
 
-    dataset_root = _download_tiny_imagenet(dataset_id)
+    root = data_root or _infer_data_root(train_dir, val_dir, fallback_root)
+    dataset_root = root / "tiny-imagenet-200"
+    if dataset_root.exists():
+        shutil.rmtree(dataset_root, ignore_errors=True)
+    dataset_root = _download_tiny_imagenet(root, url)
     train_dir = dataset_root / "train"
     val_dir = dataset_root / "val"
     _prepare_val_imagefolder(val_dir)
     if check_integrity and not _dataset_is_complete(train_dir, val_dir, num_classes):
         print("==> Dataset incomplete after download; retrying..", flush=True)
         shutil.rmtree(dataset_root, ignore_errors=True)
-        dataset_root = _download_tiny_imagenet(dataset_id)
+        dataset_root = _download_tiny_imagenet(root, url)
         train_dir = dataset_root / "train"
         val_dir = dataset_root / "val"
         _prepare_val_imagefolder(val_dir)
@@ -313,14 +332,18 @@ def main() -> None:
     train_dir = Path(args.train_dir).expanduser()
     val_dir = Path(args.val_dir).expanduser()
 
+    data_root = Path(args.data_root).expanduser() if args.data_root else None
     expected_classes = int(args.num_classes) if int(args.num_classes) > 0 else 200
     train_dir, val_dir = _ensure_dataset(
         train_dir,
         val_dir,
-        str(args.dataset_id),
+        data_root,
+        str(args.dataset_url),
         bool(args.download),
+        bool(args.force_download),
         bool(args.check_integrity),
         expected_classes,
+        fallback_root=(script_dir / "data"),
     )
 
     print("==> Preparing data..", flush=True)

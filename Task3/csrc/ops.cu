@@ -1,15 +1,25 @@
 #include <torch/extension.h>
 
+#include <cudnn.h>
+
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <cstdlib>
 #include <cstdint>
+#include <string>
 #include <tuple>
 
 namespace {
+
+#define CUDNN_CHECK(expr)                                                                             \
+    do {                                                                                              \
+        cudnnStatus_t status = (expr);                                                                \
+        TORCH_CHECK(status == CUDNN_STATUS_SUCCESS, "cuDNN error: ", cudnnGetErrorString(status));    \
+    } while (0)
 
 inline void check_cuda(const torch::Tensor& t, const char* name) {
     TORCH_CHECK(t.is_cuda(), name, " must be a CUDA tensor");
@@ -25,6 +35,58 @@ inline void check_float_cuda(const torch::Tensor& t, const char* name) {
 }
 
 __device__ __forceinline__ float relu(float x) { return x > 0.0f ? x : 0.0f; }
+
+struct CudnnHandle {
+    cudnnHandle_t handle;
+    CudnnHandle() { CUDNN_CHECK(cudnnCreate(&handle)); }
+    ~CudnnHandle() { cudnnDestroy(handle); }
+    CudnnHandle(const CudnnHandle&) = delete;
+    CudnnHandle& operator=(const CudnnHandle&) = delete;
+};
+
+struct CudnnTensorDesc {
+    cudnnTensorDescriptor_t desc;
+    CudnnTensorDesc() { CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc)); }
+    ~CudnnTensorDesc() { cudnnDestroyTensorDescriptor(desc); }
+    CudnnTensorDesc(const CudnnTensorDesc&) = delete;
+    CudnnTensorDesc& operator=(const CudnnTensorDesc&) = delete;
+};
+
+struct CudnnFilterDesc {
+    cudnnFilterDescriptor_t desc;
+    CudnnFilterDesc() { CUDNN_CHECK(cudnnCreateFilterDescriptor(&desc)); }
+    ~CudnnFilterDesc() { cudnnDestroyFilterDescriptor(desc); }
+    CudnnFilterDesc(const CudnnFilterDesc&) = delete;
+    CudnnFilterDesc& operator=(const CudnnFilterDesc&) = delete;
+};
+
+struct CudnnConvDesc {
+    cudnnConvolutionDescriptor_t desc;
+    CudnnConvDesc() { CUDNN_CHECK(cudnnCreateConvolutionDescriptor(&desc)); }
+    ~CudnnConvDesc() { cudnnDestroyConvolutionDescriptor(desc); }
+    CudnnConvDesc(const CudnnConvDesc&) = delete;
+    CudnnConvDesc& operator=(const CudnnConvDesc&) = delete;
+};
+
+inline cudnnHandle_t get_cudnn_handle(cudaStream_t stream) {
+    static thread_local CudnnHandle handle;
+    CUDNN_CHECK(cudnnSetStream(handle.handle, stream));
+    return handle.handle;
+}
+
+inline void set_tensor4d_desc(cudnnTensorDescriptor_t desc, int N, int C, int H, int W) {
+    CUDNN_CHECK(cudnnSetTensor4dDescriptor(desc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, N, C, H, W));
+}
+
+inline void set_filter4d_desc(cudnnFilterDescriptor_t desc, int K, int C, int H, int W) {
+    CUDNN_CHECK(cudnnSetFilter4dDescriptor(desc, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, K, C, H, W));
+}
+
+inline bool cudnn_enabled() {
+    const char* env = std::getenv("TASK3_USE_CUDNN");
+    if (!env) return true;
+    return std::string(env) != "0";
+}
 
 __inline__ __device__ float warpReduceSum(float val) {
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
@@ -808,6 +870,149 @@ __global__ void sgd_update_vec4_kernel(float* __restrict__ param, const float* _
     reinterpret_cast<float4*>(vel)[idx] = v;
 }
 
+torch::Tensor conv2d_forward_cudnn(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b, int stride,
+                                   int padding) {
+    const int N = (int)x.size(0);
+    const int Cin = (int)x.size(1);
+    const int Hin = (int)x.size(2);
+    const int Win = (int)x.size(3);
+    const int Cout = (int)w.size(0);
+    const int Kh = (int)w.size(2);
+    const int Kw = (int)w.size(3);
+    const int Hout = (Hin + 2 * padding - Kh) / stride + 1;
+    const int Wout = (Win + 2 * padding - Kw) / stride + 1;
+    auto y = torch::empty({N, Cout, Hout, Wout}, x.options());
+
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    cudnnHandle_t handle = get_cudnn_handle(stream);
+
+    CudnnTensorDesc x_desc;
+    CudnnTensorDesc y_desc;
+    CudnnFilterDesc w_desc;
+    CudnnConvDesc conv_desc;
+    set_tensor4d_desc(x_desc.desc, N, Cin, Hin, Win);
+    set_tensor4d_desc(y_desc.desc, N, Cout, Hout, Wout);
+    set_filter4d_desc(w_desc.desc, Cout, Cin, Kh, Kw);
+    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc.desc, padding, padding, stride, stride, 1, 1,
+                                                CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+    CUDNN_CHECK(cudnnSetConvolutionGroupCount(conv_desc.desc, 1));
+    CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_DEFAULT_MATH));
+
+    int n_out = 0;
+    int c_out = 0;
+    int h_out = 0;
+    int w_out = 0;
+    CUDNN_CHECK(cudnnGetConvolution2dForwardOutputDim(conv_desc.desc, x_desc.desc, w_desc.desc, &n_out, &c_out,
+                                                      &h_out, &w_out));
+    TORCH_CHECK(n_out == N && c_out == Cout && h_out == Hout && w_out == Wout,
+                "conv2d_forward: cuDNN output shape mismatch");
+
+    cudnnConvolutionFwdAlgoPerf_t perf{};
+    int algo_count = 0;
+    CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(handle, x_desc.desc, w_desc.desc, conv_desc.desc, y_desc.desc, 1,
+                                                       &algo_count, &perf));
+    size_t workspace_size = 0;
+    CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(handle, x_desc.desc, w_desc.desc, conv_desc.desc, y_desc.desc,
+                                                        perf.algo, &workspace_size));
+    auto workspace = workspace_size > 0 ? torch::empty({(int64_t)workspace_size}, x.options().dtype(torch::kUInt8))
+                                        : torch::empty({0}, x.options().dtype(torch::kUInt8));
+    void* workspace_ptr = workspace_size > 0 ? workspace.data_ptr() : nullptr;
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    CUDNN_CHECK(cudnnConvolutionForward(handle, &alpha, x_desc.desc, x.data_ptr<float>(), w_desc.desc,
+                                        w.data_ptr<float>(), conv_desc.desc, perf.algo, workspace_ptr, workspace_size,
+                                        &beta, y_desc.desc, y.data_ptr<float>()));
+
+    if (b.has_value()) {
+        CudnnTensorDesc b_desc;
+        set_tensor4d_desc(b_desc.desc, 1, Cout, 1, 1);
+        float beta_add = 1.0f;
+        CUDNN_CHECK(cudnnAddTensor(handle, &alpha, b_desc.desc, b->data_ptr<float>(), &beta_add, y_desc.desc,
+                                   y.data_ptr<float>()));
+    }
+    return y;
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> conv2d_backward_cudnn(torch::Tensor grad_out, torch::Tensor x,
+                                                                              torch::Tensor w, bool need_grad_x,
+                                                                              bool need_grad_w, bool need_grad_b,
+                                                                              int stride, int padding) {
+    const int N = (int)x.size(0);
+    const int Cin = (int)x.size(1);
+    const int Hin = (int)x.size(2);
+    const int Win = (int)x.size(3);
+    const int Cout = (int)w.size(0);
+    const int Kh = (int)w.size(2);
+    const int Kw = (int)w.size(3);
+    const int Hout = (int)grad_out.size(2);
+    const int Wout = (int)grad_out.size(3);
+
+    auto grad_x = need_grad_x ? torch::empty_like(x) : torch::empty({0}, x.options());
+    auto grad_w = need_grad_w ? torch::empty_like(w) : torch::empty({0}, x.options());
+    auto grad_b = need_grad_b ? torch::empty({Cout}, x.options()) : torch::empty({0}, x.options());
+
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    cudnnHandle_t handle = get_cudnn_handle(stream);
+
+    CudnnTensorDesc x_desc;
+    CudnnTensorDesc y_desc;
+    CudnnFilterDesc w_desc;
+    CudnnConvDesc conv_desc;
+    set_tensor4d_desc(x_desc.desc, N, Cin, Hin, Win);
+    set_tensor4d_desc(y_desc.desc, N, Cout, Hout, Wout);
+    set_filter4d_desc(w_desc.desc, Cout, Cin, Kh, Kw);
+    CUDNN_CHECK(cudnnSetConvolution2dDescriptor(conv_desc.desc, padding, padding, stride, stride, 1, 1,
+                                                CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));
+    CUDNN_CHECK(cudnnSetConvolutionGroupCount(conv_desc.desc, 1));
+    CUDNN_CHECK(cudnnSetConvolutionMathType(conv_desc.desc, CUDNN_DEFAULT_MATH));
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    if (need_grad_x) {
+        cudnnConvolutionBwdDataAlgoPerf_t perf{};
+        int algo_count = 0;
+        CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(handle, w_desc.desc, y_desc.desc, conv_desc.desc,
+                                                                x_desc.desc, 1, &algo_count, &perf));
+        size_t workspace_size = 0;
+        CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(handle, w_desc.desc, y_desc.desc, conv_desc.desc,
+                                                                 x_desc.desc, perf.algo, &workspace_size));
+        auto workspace =
+            workspace_size > 0 ? torch::empty({(int64_t)workspace_size}, x.options().dtype(torch::kUInt8))
+                               : torch::empty({0}, x.options().dtype(torch::kUInt8));
+        void* workspace_ptr = workspace_size > 0 ? workspace.data_ptr() : nullptr;
+        CUDNN_CHECK(cudnnConvolutionBackwardData(handle, &alpha, w_desc.desc, w.data_ptr<float>(), y_desc.desc,
+                                                 grad_out.data_ptr<float>(), conv_desc.desc, perf.algo, workspace_ptr,
+                                                 workspace_size, &beta, x_desc.desc, grad_x.data_ptr<float>()));
+    }
+
+    if (need_grad_w) {
+        cudnnConvolutionBwdFilterAlgoPerf_t perf{};
+        int algo_count = 0;
+        CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(handle, x_desc.desc, y_desc.desc, conv_desc.desc,
+                                                                  w_desc.desc, 1, &algo_count, &perf));
+        size_t workspace_size = 0;
+        CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(handle, x_desc.desc, y_desc.desc, conv_desc.desc,
+                                                                   w_desc.desc, perf.algo, &workspace_size));
+        auto workspace =
+            workspace_size > 0 ? torch::empty({(int64_t)workspace_size}, x.options().dtype(torch::kUInt8))
+                               : torch::empty({0}, x.options().dtype(torch::kUInt8));
+        void* workspace_ptr = workspace_size > 0 ? workspace.data_ptr() : nullptr;
+        CUDNN_CHECK(cudnnConvolutionBackwardFilter(handle, &alpha, x_desc.desc, x.data_ptr<float>(), y_desc.desc,
+                                                   grad_out.data_ptr<float>(), conv_desc.desc, perf.algo,
+                                                   workspace_ptr, workspace_size, &beta, w_desc.desc,
+                                                   grad_w.data_ptr<float>()));
+    }
+
+    if (need_grad_b) {
+        CudnnTensorDesc b_desc;
+        set_tensor4d_desc(b_desc.desc, 1, Cout, 1, 1);
+        CUDNN_CHECK(cudnnConvolutionBackwardBias(handle, &alpha, y_desc.desc, grad_out.data_ptr<float>(), &beta,
+                                                 b_desc.desc, grad_b.data_ptr<float>()));
+    }
+    return {grad_x, grad_w, grad_b};
+}
+
 }  // namespace
 
 torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b, int64_t stride,
@@ -829,6 +1034,15 @@ torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<tor
     const int Hout = (Hin + 2 * (int)padding - Kh) / (int)stride + 1;
     const int Wout = (Win + 2 * (int)padding - Kw) / (int)stride + 1;
     TORCH_CHECK(Hout > 0 && Wout > 0, "Invalid output size for conv2d (check stride/padding/kernel)");
+
+    if (cudnn_enabled()) {
+        try {
+            return conv2d_forward_cudnn(x, w, b, (int)stride, (int)padding);
+        } catch (const c10::Error& e) {
+            TORCH_WARN("conv2d_forward: cuDNN failed, falling back to custom kernel: ", e.what());
+        }
+    }
+
     auto y = torch::empty({N, Cout, Hout, Wout}, x.options());
 
     c10::cuda::CUDAGuard guard(x.device());
@@ -910,6 +1124,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> conv2d_backward(
     const auto Kw = (int)w.size(3);
     const auto Hout = (int)grad_out.size(2);
     const auto Wout = (int)grad_out.size(3);
+
+    if (cudnn_enabled()) {
+        try {
+            return conv2d_backward_cudnn(grad_out, x, w, need_grad_x, need_grad_w, need_grad_b, (int)stride,
+                                         (int)padding);
+        } catch (const c10::Error& e) {
+            TORCH_WARN("conv2d_backward: cuDNN failed, falling back to custom kernel: ", e.what());
+        }
+    }
 
     auto grad_x = need_grad_x ? torch::empty_like(x) : torch::empty({0}, x.options());
     auto grad_w = need_grad_w ? torch::empty_like(w) : torch::empty({0}, x.options());
