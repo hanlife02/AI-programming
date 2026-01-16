@@ -86,9 +86,9 @@ class TinyImageNetNet(Module):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet training with Task3 CUDA ops")
-    p.add_argument("--train-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/train")
-    p.add_argument("--val-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/val")
-    p.add_argument("--data-root", type=str, default="", help="root folder for auto-download (default: inferred)")
+    p.add_argument("--train-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/train")
+    p.add_argument("--val-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/val")
+    p.add_argument("--data-root", type=str, default="", help="root folder for auto-download (default: ./input/tiny-imagenet)")
     p.add_argument(
         "--dataset-url",
         type=str,
@@ -326,13 +326,14 @@ def main() -> None:
     device = torch.device("cuda")
 
     script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
     ckpt_path = Path(args.ckpt).expanduser() if args.ckpt else (script_dir / "checkpoint" / "ckpt.pth")
     ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
     train_dir = Path(args.train_dir).expanduser()
     val_dir = Path(args.val_dir).expanduser()
 
-    data_root = Path(args.data_root).expanduser() if args.data_root else None
+    data_root = Path(args.data_root).expanduser() if args.data_root else (repo_root / "input" / "tiny-imagenet")
     expected_classes = int(args.num_classes) if int(args.num_classes) > 0 else 200
     train_dir, val_dir = _ensure_dataset(
         train_dir,
@@ -343,7 +344,7 @@ def main() -> None:
         bool(args.force_download),
         bool(args.check_integrity),
         expected_classes,
-        fallback_root=(script_dir / "data"),
+        fallback_root=(repo_root / "input" / "tiny-imagenet"),
     )
 
     print("==> Preparing data..", flush=True)

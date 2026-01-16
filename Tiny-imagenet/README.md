@@ -23,10 +23,10 @@ python setup.py build_ext --inplace
 
 ## 2) 训练
 
-默认数据路径（与需求一致）：
+默认数据路径（在仓库根目录的 `input/` 下）：
 
-- 训练集：`../input/tiny-imagenet/tiny-imagenet-200/train`
-- 验证集：`../input/tiny-imagenet/tiny-imagenet-200/val`
+- 训练集：`input/tiny-imagenet/tiny-imagenet-200/train`
+- 验证集：`input/tiny-imagenet/tiny-imagenet-200/val`
 
 从仓库根目录运行：
 
@@ -41,7 +41,7 @@ python Tiny-imagenet/train.py
 - `--download/--no-download`: 自动下载 Tiny-ImageNet（默认开启）
 - `--force-download`: 强制重新下载（忽略本地已有数据）
 - `--check-integrity/--no-check-integrity`: 完整性校验（默认开启）
-- `--data-root`: 自动下载根目录（默认自动推断）
+- `--data-root`: 自动下载根目录（默认 `input/tiny-imagenet`）
 - `--dataset-url`: Tiny-ImageNet zip 下载地址（默认 CS231n 官方）
 - `--num-classes`: 类别数（默认 200）
 - `--model`: VGG 配置（默认 `VGG16`）
