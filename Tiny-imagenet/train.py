@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import math
+import shutil
 import sys
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import torch
@@ -84,6 +87,14 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet training with Task3 CUDA ops")
     p.add_argument("--train-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/train")
     p.add_argument("--val-dir", type=str, default="../input/tiny-imagenet/tiny-imagenet-200/val")
+    p.add_argument("--data-root", type=str, default="", help="root folder for auto-download (default: inferred)")
+    p.add_argument(
+        "--dataset-url",
+        type=str,
+        default="https://cs231n.stanford.edu/tiny-imagenet-200.zip",
+        help="Tiny-ImageNet zip URL for auto-download",
+    )
+    p.add_argument("--download", action=argparse.BooleanOptionalAction, default=True, help="auto download if missing")
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--model", type=str, default="VGG16", choices=sorted(_VGG_CFG.keys()))
     p.add_argument("--epochs", type=int, default=90)
@@ -158,6 +169,98 @@ def evaluate(net: Module, device: torch.device, loader: torch.utils.data.DataLoa
     return 100.0 * correct / max(1, total)
 
 
+def _infer_data_root(train_dir: Path, val_dir: Path, fallback: Path) -> Path:
+    if train_dir.name == "train" and train_dir.parent.name == "tiny-imagenet-200":
+        return train_dir.parent.parent
+    if val_dir.name == "val" and val_dir.parent.name == "tiny-imagenet-200":
+        return val_dir.parent.parent
+    return fallback
+
+
+def _download_tiny_imagenet(data_root: Path, url: str) -> Path:
+    data_root.mkdir(parents=True, exist_ok=True)
+    dataset_root = data_root / "tiny-imagenet-200"
+    if (dataset_root / "train").exists() and (dataset_root / "val").exists():
+        return dataset_root
+
+    zip_path = data_root / "tiny-imagenet-200.zip"
+    if not zip_path.exists():
+        tmp_path = zip_path.with_suffix(".zip.part")
+        print(f"==> Downloading Tiny-ImageNet to {zip_path} ..", flush=True)
+        with urllib.request.urlopen(url) as resp, tmp_path.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+        tmp_path.replace(zip_path)
+
+    print(f"==> Extracting {zip_path} ..", flush=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(data_root)
+    return dataset_root
+
+
+def _val_is_imagefolder(val_dir: Path) -> bool:
+    if not val_dir.exists():
+        return False
+    for item in val_dir.iterdir():
+        if item.is_dir() and item.name != "images":
+            if any(item.iterdir()):
+                return True
+    return False
+
+
+def _prepare_val_imagefolder(val_dir: Path) -> None:
+    if _val_is_imagefolder(val_dir):
+        return
+    images_dir = val_dir / "images"
+    ann_path = val_dir / "val_annotations.txt"
+    if not images_dir.exists() or not ann_path.exists():
+        raise FileNotFoundError(f"val folder is not ImageFolder and missing {images_dir} or {ann_path}")
+
+    mapping: dict[str, str] = {}
+    with ann_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
+                mapping[parts[0]] = parts[1]
+
+    moved = 0
+    for filename, cls in mapping.items():
+        src = images_dir / filename
+        if not src.exists():
+            continue
+        dst_dir = val_dir / cls
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst_dir / filename))
+        moved += 1
+
+    if moved == 0:
+        raise RuntimeError("val preprocessing failed; no images moved")
+
+    remaining = list(images_dir.iterdir()) if images_dir.exists() else []
+    if not remaining:
+        images_dir.rmdir()
+
+
+def _ensure_dataset(
+    train_dir: Path,
+    val_dir: Path,
+    data_root: Path | None,
+    url: str,
+    download: bool,
+    fallback_root: Path,
+) -> tuple[Path, Path]:
+    if train_dir.exists() and val_dir.exists():
+        _prepare_val_imagefolder(val_dir)
+        return train_dir, val_dir
+    if not download:
+        raise FileNotFoundError(f"train/val dir not found: {train_dir} {val_dir}")
+    root = data_root or _infer_data_root(train_dir, val_dir, fallback_root)
+    dataset_root = _download_tiny_imagenet(root, url)
+    train_dir = dataset_root / "train"
+    val_dir = dataset_root / "val"
+    _prepare_val_imagefolder(val_dir)
+    return train_dir, val_dir
+
+
 def main() -> None:
     args = parse_args()
     try:
@@ -175,10 +278,16 @@ def main() -> None:
 
     train_dir = Path(args.train_dir).expanduser()
     val_dir = Path(args.val_dir).expanduser()
-    if not train_dir.exists():
-        raise FileNotFoundError(f"train dir not found: {train_dir}")
-    if not val_dir.exists():
-        raise FileNotFoundError(f"val dir not found: {val_dir}")
+    data_root = Path(args.data_root).expanduser() if args.data_root else None
+
+    train_dir, val_dir = _ensure_dataset(
+        train_dir,
+        val_dir,
+        data_root,
+        str(args.dataset_url),
+        bool(args.download),
+        fallback_root=(script_dir / "data"),
+    )
 
     print("==> Preparing data..", flush=True)
     transform_train, transform_val = build_transforms(bool(args.augment))
