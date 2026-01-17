@@ -6,7 +6,6 @@
 - Python 侧只负责：计算图、优化器与训练循环（`Task3/minifw/*` + `Tiny-imagenet/train.py`）。
 - 数据加载使用 `torchvision.datasets.ImageFolder`，默认 **64×64** 输入。
 - 训练脚本支持 **自动下载 Tiny-ImageNet**，并将 `val` 预处理成 ImageFolder 结构。
-- 训练过程中 **每个 epoch 必做验证**，不可跳过。
 
 ## 1) 构建扩展
 
@@ -16,10 +15,6 @@
 cd Task3
 python setup.py build_ext --inplace
 ```
-
-如遇到 GPU 架构相关报错，可参考 `Task3/README.md` 中的 `TASK3_CUDA_ARCH_LIST` 说明。
-
-自动下载使用 CS231n 官方链接。
 
 ## 2) 训练
 
@@ -56,13 +51,7 @@ python Tiny-imagenet/train.py
 - 模型内部使用 `GlobalAvgPool2d` 适配 64×64 输入，因此无需手动改输入尺寸。
 - `--num-classes` 与数据集类别不一致时会提示警告。
 
-## 4) 验证集评估
-
-训练脚本每个 epoch 自动在验证集上评估；也可单独运行：
-
-```bash
-python Tiny-imagenet/eval.py --ckpt Tiny-imagenet/checkpoint/ckpt.pth
-```
+## 4) 测试集评估
 
 使用测试集（若 test 为无标签格式，将输出预测 CSV）：
 
