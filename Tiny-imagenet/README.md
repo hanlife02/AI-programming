@@ -18,7 +18,7 @@ python setup.py build_ext --inplace
 
 ## 2) 训练
 
-默认数据路径（在仓库根目录的 `input/` 下）：
+默认数据路径（在repo根目录的 `input/` 下）：
 
 - 训练集：`input/tiny-imagenet/tiny-imagenet-200/train`
 - 验证集：`input/tiny-imagenet/tiny-imagenet-200/val`
