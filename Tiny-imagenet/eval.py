@@ -118,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--val-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/val")
     p.add_argument("--test-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/test")
     p.add_argument("--train-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/train")
+    p.add_argument("--test-annotations", type=str, default="", help="test annotations file (filename<tab>label)")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--model", type=str, default="VGG16", choices=sorted(_VGG_CFG.keys()))
@@ -210,6 +211,53 @@ class ImageListDataset(torch.utils.data.Dataset):
         return self.transform(img), path.name
 
 
+class LabeledImageListDataset(torch.utils.data.Dataset):
+
+    def __init__(self, samples: list[tuple[Path, int]], transform) -> None:
+        self.samples = samples
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int):
+        try:
+            from PIL import Image
+        except ModuleNotFoundError as e:  # pragma: no cover
+            raise ModuleNotFoundError("Evaluation requires Pillow. Install it with: pip install pillow") from e
+        path, label = self.samples[idx]
+        img = Image.open(path).convert("RGB")
+        return self.transform(img), int(label)
+
+
+def _find_test_annotations(test_dir: Path, explicit: str) -> Path | None:
+    if explicit:
+        return Path(explicit).expanduser()
+    candidates = [
+        test_dir / "test_annotations.txt",
+        test_dir / "annotations.txt",
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
+    return None
+
+
+def _load_annotation_map(path: Path) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                parts = line.split()
+            if len(parts) >= 2:
+                mapping[parts[0]] = parts[1]
+    return mapping
+
+
 @torch.no_grad()
 def evaluate(net: Module, device: torch.device, loader: torch.utils.data.DataLoader) -> float:
     net.eval()
@@ -299,14 +347,39 @@ def main() -> None:
             class_names = dataset.classes
         else:
             images_root = test_dir / "images" if (test_dir / "images").exists() else test_dir
-            files = _list_image_files(images_root)
-            if not files:
-                raise RuntimeError(f"no test images found under: {images_root}")
-            if not train_dir.exists():
-                raise FileNotFoundError(f"train dir not found for class names: {train_dir}")
-            class_names = torchvision.datasets.ImageFolder(str(train_dir)).classes
-            dataset = ImageListDataset(files, transform)
-            unlabeled = True
+            ann_path = _find_test_annotations(test_dir, str(args.test_annotations))
+            if ann_path is None or not ann_path.exists():
+                files = _list_image_files(images_root)
+                if not files:
+                    raise RuntimeError(f"no test images found under: {images_root}")
+                if not train_dir.exists():
+                    raise FileNotFoundError(f"train dir not found for class names: {train_dir}")
+                class_names = torchvision.datasets.ImageFolder(str(train_dir)).classes
+                if not args.save_preds:
+                    raise FileNotFoundError("test annotations not found; provide --test-annotations or use --save-preds")
+                dataset = ImageListDataset(files, transform)
+                unlabeled = True
+            else:
+                if not train_dir.exists():
+                    raise FileNotFoundError(f"train dir not found for class names: {train_dir}")
+                class_names = torchvision.datasets.ImageFolder(str(train_dir)).classes
+                class_to_idx = {cls: i for i, cls in enumerate(class_names)}
+                mapping = _load_annotation_map(ann_path)
+                samples: list[tuple[Path, int]] = []
+                missing = 0
+                for filename, label in mapping.items():
+                    if label not in class_to_idx:
+                        raise ValueError(f"unknown label in test annotations: {label}")
+                    path = images_root / filename
+                    if not path.exists():
+                        missing += 1
+                        continue
+                    samples.append((path, class_to_idx[label]))
+                if not samples:
+                    raise RuntimeError("no labeled test samples found from annotations")
+                if missing:
+                    print(f"warning: {missing} annotated test images missing on disk", flush=True)
+                dataset = LabeledImageListDataset(samples, transform)
 
     if class_names is None or dataset is None:
         raise RuntimeError("failed to initialize dataset")
