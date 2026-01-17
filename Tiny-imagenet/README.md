@@ -63,3 +63,11 @@ python Tiny-imagenet/train.py
 ```bash
 python Tiny-imagenet/eval.py --ckpt Tiny-imagenet/checkpoint/ckpt.pth
 ```
+
+使用测试集（若 test 为无标签格式，将输出预测 CSV）：
+
+```bash
+python Tiny-imagenet/eval.py --split test --ckpt Tiny-imagenet/checkpoint/ckpt.pth
+```
+
+默认输出：`Tiny-imagenet/outputs/test_preds.csv`（可用 `--save-preds` 指定）。

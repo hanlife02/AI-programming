@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
@@ -79,12 +80,16 @@ class TinyImageNetNet(Module):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet evaluation with Task3 CUDA ops")
+    p.add_argument("--split", type=str, default="val", choices=["val", "test"])
     p.add_argument("--val-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/val")
+    p.add_argument("--test-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/test")
+    p.add_argument("--train-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/train")
     p.add_argument("--ckpt", type=str, default="")
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--model", type=str, default="VGG16", choices=sorted(_VGG_CFG.keys()))
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--num-workers", type=int, default=4)
+    p.add_argument("--save-preds", type=str, default="", help="save test predictions to CSV when test has no labels")
     return p.parse_args()
 
 
@@ -142,6 +147,35 @@ def _prepare_val_imagefolder(val_dir: Path) -> None:
         images_dir.rmdir()
 
 
+def _list_image_files(root: Path) -> list[Path]:
+    exts = {".jpeg", ".jpg", ".png", ".JPEG", ".JPG", ".PNG"}
+    files: list[Path] = []
+    if root.is_dir():
+        for name in sorted(root.iterdir()):
+            if name.is_file() and name.suffix in exts:
+                files.append(name)
+    return files
+
+
+class ImageListDataset(torch.utils.data.Dataset):
+
+    def __init__(self, files: list[Path], transform) -> None:
+        self.files = files
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(self, idx: int):
+        try:
+            from PIL import Image
+        except ModuleNotFoundError as e:  # pragma: no cover
+            raise ModuleNotFoundError("Evaluation requires Pillow. Install it with: pip install pillow") from e
+        path = self.files[idx]
+        img = Image.open(path).convert("RGB")
+        return self.transform(img), path.name
+
+
 @torch.no_grad()
 def evaluate(net: Module, device: torch.device, loader: torch.utils.data.DataLoader) -> float:
     net.eval()
@@ -156,6 +190,33 @@ def evaluate(net: Module, device: torch.device, loader: torch.utils.data.DataLoa
         correct += int(predicted.eq(targets).sum().item())
         progress_bar(batch_idx, len(loader), "Acc: %.3f%% (%d/%d)" % (100.0 * correct / max(1, total), correct, total))
     return 100.0 * correct / max(1, total)
+
+
+@torch.no_grad()
+def predict(
+    net: Module,
+    device: torch.device,
+    loader: torch.utils.data.DataLoader,
+    class_names: list[str],
+    out_path: Path,
+) -> None:
+    net.eval()
+    rows: list[tuple[str, str]] = []
+    for batch_idx, (inputs, names) in enumerate(loader):
+        inputs = inputs.to(device, non_blocking=True).contiguous()
+        outputs = net(Tensor(inputs, requires_grad=False)).data
+        _, predicted = outputs.max(1)
+        preds = predicted.detach().cpu().tolist()
+        for filename, idx in zip(list(names), preds):
+            rows.append((filename, class_names[int(idx)]))
+        progress_bar(batch_idx, len(loader), "Pred: %d" % (len(rows)))
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["filename", "pred"])
+        writer.writerows(rows)
+    print(f"saved predictions to: {out_path}", flush=True)
 
 
 def main() -> None:
@@ -174,24 +235,54 @@ def main() -> None:
     if not ckpt_path.exists():
         raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
 
-    val_dir = Path(args.val_dir).expanduser()
-    if not val_dir.exists():
-        raise FileNotFoundError(f"val dir not found: {val_dir}")
-    _prepare_val_imagefolder(val_dir)
-
+    split = str(args.split)
     transform = build_val_transform()
-    valset = torchvision.datasets.ImageFolder(str(val_dir), transform=transform)
-    if len(valset) == 0:
-        raise RuntimeError("val dataset is empty")
+    val_dir = Path(args.val_dir).expanduser()
+    test_dir = Path(args.test_dir).expanduser()
+    train_dir = Path(args.train_dir).expanduser()
 
-    num_classes = int(args.num_classes)
-    if num_classes <= 0:
-        num_classes = len(valset.classes)
-    elif num_classes != len(valset.classes):
-        print(f"warning: --num-classes={num_classes} but val has {len(valset.classes)} classes", flush=True)
+    requested_num_classes = int(args.num_classes)
+    dataset = None
+    loader = None
+    class_names: list[str] | None = None
+    unlabeled = False
 
-    valloader = torch.utils.data.DataLoader(
-        valset,
+    if split == "val":
+        if not val_dir.exists():
+            raise FileNotFoundError(f"val dir not found: {val_dir}")
+        _prepare_val_imagefolder(val_dir)
+        dataset = torchvision.datasets.ImageFolder(str(val_dir), transform=transform)
+        if len(dataset) == 0:
+            raise RuntimeError("val dataset is empty")
+        class_names = dataset.classes
+    else:
+        if not test_dir.exists():
+            raise FileNotFoundError(f"test dir not found: {test_dir}")
+        if _val_is_imagefolder(test_dir):
+            dataset = torchvision.datasets.ImageFolder(str(test_dir), transform=transform)
+            if len(dataset) == 0:
+                raise RuntimeError("test dataset is empty")
+            class_names = dataset.classes
+        else:
+            images_root = test_dir / "images" if (test_dir / "images").exists() else test_dir
+            files = _list_image_files(images_root)
+            if not files:
+                raise RuntimeError(f"no test images found under: {images_root}")
+            if not train_dir.exists():
+                raise FileNotFoundError(f"train dir not found for class names: {train_dir}")
+            class_names = torchvision.datasets.ImageFolder(str(train_dir)).classes
+            dataset = ImageListDataset(files, transform)
+            unlabeled = True
+
+    if class_names is None or dataset is None:
+        raise RuntimeError("failed to initialize dataset")
+
+    num_classes = requested_num_classes if requested_num_classes > 0 else len(class_names)
+    if len(class_names) != num_classes:
+        raise ValueError(f"num_classes mismatch: dataset has {len(class_names)} classes, num_classes={num_classes}")
+
+    loader = torch.utils.data.DataLoader(
+        dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -211,9 +302,21 @@ def main() -> None:
             raise KeyError(f"Missing parameter in checkpoint: {name}")
         p.data.copy_(state[name].to(device))
 
-    print("==> Evaluating..", flush=True)
-    acc = evaluate(net, device, valloader)
-    print(f"val acc: {acc:.3f}%", flush=True)
+    if split == "val":
+        print("==> Evaluating (val)..", flush=True)
+        acc = evaluate(net, device, loader)
+        print(f"val acc: {acc:.3f}%", flush=True)
+        return
+
+    if not unlabeled:
+        print("==> Evaluating (test)..", flush=True)
+        acc = evaluate(net, device, loader)
+        print(f"test acc: {acc:.3f}%", flush=True)
+        return
+
+    out_path = Path(args.save_preds).expanduser() if args.save_preds else (script_dir / "outputs" / "test_preds.csv")
+    print("==> Predicting (test, unlabeled)..", flush=True)
+    predict(net, device, loader, class_names, out_path)
 
 
 if __name__ == "__main__":
