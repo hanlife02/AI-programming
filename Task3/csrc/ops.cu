@@ -1013,6 +1013,130 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> conv2d_backward_cudnn(to
     return {grad_x, grad_w, grad_b};
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_forward_cudnn(
+    torch::Tensor x,
+    torch::Tensor weight,
+    torch::Tensor bias,
+    torch::Tensor running_mean,
+    torch::Tensor running_var,
+    bool training,
+    double momentum,
+    double eps) {
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+    auto y = torch::empty_like(x);
+    torch::Tensor mean = training ? torch::empty({C}, x.options()) : running_mean;
+    auto invstd = torch::empty({C}, x.options());
+
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    cudnnHandle_t handle = get_cudnn_handle(stream);
+
+    CudnnTensorDesc x_desc;
+    CudnnTensorDesc y_desc;
+    CudnnTensorDesc bn_desc;
+    set_tensor4d_desc(x_desc.desc, N, C, H, W);
+    set_tensor4d_desc(y_desc.desc, N, C, H, W);
+    CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(bn_desc.desc, x_desc.desc, CUDNN_BATCHNORM_SPATIAL));
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    if (training) {
+        CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(
+            handle,
+            CUDNN_BATCHNORM_SPATIAL,
+            &alpha,
+            &beta,
+            x_desc.desc,
+            x.data_ptr<float>(),
+            y_desc.desc,
+            y.data_ptr<float>(),
+            bn_desc.desc,
+            weight.data_ptr<float>(),
+            bias.data_ptr<float>(),
+            (double)momentum,
+            running_mean.data_ptr<float>(),
+            running_var.data_ptr<float>(),
+            (double)eps,
+            mean.data_ptr<float>(),
+            invstd.data_ptr<float>()));
+    } else {
+        CUDNN_CHECK(cudnnBatchNormalizationForwardInference(
+            handle,
+            CUDNN_BATCHNORM_SPATIAL,
+            &alpha,
+            &beta,
+            x_desc.desc,
+            x.data_ptr<float>(),
+            y_desc.desc,
+            y.data_ptr<float>(),
+            bn_desc.desc,
+            weight.data_ptr<float>(),
+            bias.data_ptr<float>(),
+            running_mean.data_ptr<float>(),
+            running_var.data_ptr<float>(),
+            (double)eps));
+        int threads = 256;
+        int blocks = (C + threads - 1) / threads;
+        bn_invstd_kernel<<<blocks, threads, 0, stream>>>(running_var.data_ptr<float>(), invstd.data_ptr<float>(), C,
+                                                         (float)eps);
+    }
+    return {y, mean, invstd};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_backward_cudnn(
+    torch::Tensor grad_out,
+    torch::Tensor x,
+    torch::Tensor weight,
+    torch::Tensor saved_mean,
+    torch::Tensor saved_invstd) {
+    const int N = (int)x.size(0);
+    const int C = (int)x.size(1);
+    const int H = (int)x.size(2);
+    const int W = (int)x.size(3);
+
+    auto grad_x = torch::empty_like(x);
+    auto grad_w = torch::empty({C}, x.options());
+    auto grad_b = torch::empty({C}, x.options());
+
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+    cudnnHandle_t handle = get_cudnn_handle(stream);
+
+    CudnnTensorDesc x_desc;
+    CudnnTensorDesc y_desc;
+    CudnnTensorDesc bn_desc;
+    set_tensor4d_desc(x_desc.desc, N, C, H, W);
+    set_tensor4d_desc(y_desc.desc, N, C, H, W);
+    CUDNN_CHECK(cudnnDeriveBNTensorDescriptor(bn_desc.desc, x_desc.desc, CUDNN_BATCHNORM_SPATIAL));
+
+    float alpha_data = 1.0f;
+    float beta_data = 0.0f;
+    float alpha_param = 1.0f;
+    float beta_param = 0.0f;
+    CUDNN_CHECK(cudnnBatchNormalizationBackward(
+        handle,
+        CUDNN_BATCHNORM_SPATIAL,
+        &alpha_data,
+        &beta_data,
+        &alpha_param,
+        &beta_param,
+        x_desc.desc,
+        x.data_ptr<float>(),
+        y_desc.desc,
+        grad_out.data_ptr<float>(),
+        x_desc.desc,
+        grad_x.data_ptr<float>(),
+        bn_desc.desc,
+        weight.data_ptr<float>(),
+        grad_w.data_ptr<float>(),
+        grad_b.data_ptr<float>(),
+        (double)1e-5,
+        saved_mean.data_ptr<float>(),
+        saved_invstd.data_ptr<float>()));
+    return {grad_x, grad_w, grad_b};
+}
+
 }  // namespace
 
 torch::Tensor conv2d_forward(torch::Tensor x, torch::Tensor w, c10::optional<torch::Tensor> b, int64_t stride,
@@ -1476,12 +1600,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_forward(torc
     TORCH_CHECK(weight.numel() == C && bias.numel() == C, "weight/bias must have shape (C)");
     TORCH_CHECK(running_mean.numel() == C && running_var.numel() == C, "running stats must have shape (C)");
 
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+
+    if (cudnn_enabled()) {
+        try {
+            return batchnorm2d_forward_cudnn(x, weight, bias, running_mean, running_var, training, momentum, eps);
+        } catch (const c10::Error& e) {
+            TORCH_WARN("batchnorm2d_forward: cuDNN failed, falling back to custom kernel: ", e.what());
+        }
+    }
+
     auto y = torch::empty_like(x);
     torch::Tensor mean = training ? torch::empty({C}, x.options()) : running_mean;
     auto invstd = torch::empty({C}, x.options());
-
-    c10::cuda::CUDAGuard guard(x.device());
-    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
 
     if (training) {
         auto var = torch::empty({C}, x.options());
@@ -1534,12 +1666,20 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> batchnorm2d_backward(tor
     const int H = (int)x.size(2);
     const int W = (int)x.size(3);
 
+    c10::cuda::CUDAGuard guard(x.device());
+    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
+
+    if (cudnn_enabled() && need_grad_x && need_grad_w && need_grad_b) {
+        try {
+            return batchnorm2d_backward_cudnn(grad_out, x, weight, saved_mean, saved_invstd);
+        } catch (const c10::Error& e) {
+            TORCH_WARN("batchnorm2d_backward: cuDNN failed, falling back to custom kernel: ", e.what());
+        }
+    }
+
     auto grad_x = need_grad_x ? torch::empty_like(x) : torch::empty({0}, x.options());
     auto grad_w = need_grad_w ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
     auto grad_b = need_grad_b ? torch::empty({C}, x.options()) : torch::empty({0}, x.options());
-
-    c10::cuda::CUDAGuard guard(x.device());
-    cudaStream_t stream = at::cuda::getDefaultCUDAStream();
 
     int threads = 256;
     torch::Tensor tmp_dw;
