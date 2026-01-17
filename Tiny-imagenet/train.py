@@ -84,6 +84,49 @@ class TinyImageNetNet(Module):
         return Sequential(*layers)
 
 
+def _iter_named_modules(module: Module, prefix: str = "") -> list[tuple[str, Module]]:
+    items: list[tuple[str, Module]] = []
+    for name, value in module.__dict__.items():
+        if isinstance(value, Module):
+            full = f"{prefix}{name}" if prefix == "" else f"{prefix}.{name}"
+            items.append((full, value))
+            items.extend(_iter_named_modules(value, full))
+        elif isinstance(value, (list, tuple)):
+            for i, item in enumerate(value):
+                if isinstance(item, Module):
+                    full = f"{prefix}{name}.{i}" if prefix == "" else f"{prefix}.{name}.{i}"
+                    items.append((full, item))
+                    items.extend(_iter_named_modules(item, full))
+    return items
+
+
+def _collect_bn_stats(net: Module) -> dict[str, torch.Tensor]:
+    state: dict[str, torch.Tensor] = {}
+    for name, module in _iter_named_modules(net):
+        if isinstance(module, BatchNorm2d):
+            state[f"{name}.running_mean"] = module.running_mean.detach().clone()
+            state[f"{name}.running_var"] = module.running_var.detach().clone()
+    return state
+
+
+def _load_bn_stats(net: Module, state: dict[str, torch.Tensor], device: torch.device) -> None:
+    missing = []
+    for name, module in _iter_named_modules(net):
+        if isinstance(module, BatchNorm2d):
+            mean_key = f"{name}.running_mean"
+            var_key = f"{name}.running_var"
+            if mean_key in state:
+                module.running_mean.copy_(state[mean_key].to(device))
+            else:
+                missing.append(mean_key)
+            if var_key in state:
+                module.running_var.copy_(state[var_key].to(device))
+            else:
+                missing.append(var_key)
+    if missing:
+        print(f"warning: missing BN stats in checkpoint ({len(missing)} keys).", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet training with Task3 CUDA ops")
     p.add_argument("--train-dir", type=str, default="input/tiny-imagenet/tiny-imagenet-200/train")
@@ -405,6 +448,8 @@ def main() -> None:
             if name not in state:
                 raise KeyError(f"Missing parameter in checkpoint: {name}")
             p.data.copy_(state[name].to(device))
+        if isinstance(state, dict):
+            _load_bn_stats(net, state, device)
         best_acc = float(ckpt.get("acc", 0.0))
         start_epoch = int(ckpt.get("epoch", 0)) + 1
 
@@ -451,7 +496,7 @@ def main() -> None:
             print("Saving..", flush=True)
             state = {
                 "arch": str(args.model),
-                "net": {k: v.data for k, v in net.named_parameters().items()},
+                "net": {**{k: v.data for k, v in net.named_parameters().items()}, **_collect_bn_stats(net)},
                 "acc": acc,
                 "epoch": epoch,
             }

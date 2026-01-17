@@ -78,6 +78,40 @@ class TinyImageNetNet(Module):
         return Sequential(*layers)
 
 
+def _iter_named_modules(module: Module, prefix: str = "") -> list[tuple[str, Module]]:
+    items: list[tuple[str, Module]] = []
+    for name, value in module.__dict__.items():
+        if isinstance(value, Module):
+            full = f"{prefix}{name}" if prefix == "" else f"{prefix}.{name}"
+            items.append((full, value))
+            items.extend(_iter_named_modules(value, full))
+        elif isinstance(value, (list, tuple)):
+            for i, item in enumerate(value):
+                if isinstance(item, Module):
+                    full = f"{prefix}{name}.{i}" if prefix == "" else f"{prefix}.{name}.{i}"
+                    items.append((full, item))
+                    items.extend(_iter_named_modules(item, full))
+    return items
+
+
+def _load_bn_stats(net: Module, state: dict[str, torch.Tensor], device: torch.device) -> None:
+    missing = []
+    for name, module in _iter_named_modules(net):
+        if isinstance(module, BatchNorm2d):
+            mean_key = f"{name}.running_mean"
+            var_key = f"{name}.running_var"
+            if mean_key in state:
+                module.running_mean.copy_(state[mean_key].to(device))
+            else:
+                missing.append(mean_key)
+            if var_key in state:
+                module.running_var.copy_(state[var_key].to(device))
+            else:
+                missing.append(var_key)
+    if missing:
+        print(f"warning: missing BN stats in checkpoint ({len(missing)} keys).", flush=True)
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Tiny-ImageNet evaluation with Task3 CUDA ops")
     p.add_argument("--split", type=str, default="val", choices=["val", "test"])
@@ -301,6 +335,8 @@ def main() -> None:
         if name not in state:
             raise KeyError(f"Missing parameter in checkpoint: {name}")
         p.data.copy_(state[name].to(device))
+    if isinstance(state, dict):
+        _load_bn_stats(net, state, device)
 
     if split == "val":
         print("==> Evaluating (val)..", flush=True)
