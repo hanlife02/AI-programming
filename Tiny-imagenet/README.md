@@ -54,5 +54,5 @@ python Tiny-imagenet/train.py
 ## 4) 测试集评估
 
 ```bash
-python Tiny-imagenet/eval.py --split test --ckpt Tiny-imagenet/checkpoint/ckpt.pth
+python Tiny-imagenet/eval.py --ckpt Tiny-imagenet/checkpoint/ckpt.pth
 ```

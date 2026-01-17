@@ -143,7 +143,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--check-integrity", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--num-classes", type=int, default=200)
     p.add_argument("--model", type=str, default="VGG16", choices=sorted(_VGG_CFG.keys()))
-    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--epochs", type=int, default=90)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--lr", type=float, default=0.1)
