@@ -58,4 +58,8 @@ python Tiny-imagenet/train.py
 
 ## 4) 验证集评估
 
-训练脚本每个 epoch 自动在验证集上评估并输出准确率，无单独评估脚本。
+训练脚本每个 epoch 自动在验证集上评估；也可单独运行：
+
+```bash
+python Tiny-imagenet/eval.py --ckpt Tiny-imagenet/checkpoint/ckpt.pth
+```
