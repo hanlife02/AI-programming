@@ -36,3 +36,4 @@ report.pdf
 *.so
 build/
 
+input/
