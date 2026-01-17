@@ -7,7 +7,6 @@
 ```
 Task2/
   README.md
-  requirements.txt
   train.py
   eval.py
   utils.py
@@ -33,12 +32,6 @@ Task2/
 - `torch.cuda.is_available`
 - `torch.cuda.device_count`
 - 当前进程的 `rank/world_size/local_rank`（DDP 时）
-
-你也可以手动检查：
-
-- `nvidia-smi`
-
----
 
 ## 2. 单卡训练（baseline）
 
@@ -94,11 +87,6 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py
 
 - 单卡（默认即为该配置）：`CUDA_VISIBLE_DEVICES=0 python Task2/train.py --run-name single_bn`
 - 双卡（保持全局 batch=128）：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --batch-size 64 --run-name ddp2_bn`
-
-快速跑通（缩短 epoch）：
-
-- 单卡：`CUDA_VISIBLE_DEVICES=0 python Task2/train.py --epochs 2 --run-name single_quick`
-- 双卡：`CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 Task2/train.py --epochs 2 --batch-size 64 --run-name ddp2_quick`
 
 ---
 

@@ -5,7 +5,6 @@
 ```
 Task1/
   README.md
-  requirements.txt
   train.py
   eval.py
   plot_loss.py
@@ -21,11 +20,6 @@ Task1/
     loss.csv
     loss_curve.png
 ```
-
-### 环境
-
-- Python 3.10+
-- 依赖：见 `Task1/requirements.txt`
 
 ### 训练
 
@@ -74,9 +68,6 @@ Task1/
 
 - `python Task1/plot_loss.py --csv Task1/outputs/loss.csv --out Task1/outputs/loss_curve.png`
 
-如果不想保存 loss 曲线（加速训练吞吐），可使用：
-
-- `python Task1/train.py --no-save-loss-plot`
 
 ### 评估
 
